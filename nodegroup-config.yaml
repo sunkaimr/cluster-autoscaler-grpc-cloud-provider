@@ -1,0 +1,61 @@
+cloudProviderOption:
+  tencentcloud:
+    zhansan:
+      secretId: "XXX"
+      secretKey: "YYY"
+nodeGroups:
+- id: "master"
+  minSize: 3
+  maxSize: 3
+  targetSize: 3
+  nodeTemplate:
+    labels:
+      node-role.kubernetes.io/master: ""
+    annotations:
+    capacity:
+      cpu: "8"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    allocatable:
+      cpu: "8"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    taints:
+      - key: "node-role.kubernetes.io/master"
+        effect: "NoSchedule"
+- id: "worker-addons"
+  minSize: 3
+  maxSize: 3
+  targetSize: 3
+  nodeTemplate:
+    labels:
+      node-role.kubernetes.io/worker-addons: ""
+    annotations:
+    capacity:
+      cpu: "48"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    allocatable:
+      cpu: "8"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    taints:
+      - key: "CriticalAddonsOnly"
+        effect: "NoSchedule"
+- id: "autoscaler-test"
+  minSize: 0
+  maxSize: 10
+  targetSize: 0
+  nodeTemplate:
+    labels:
+      "node-role.kubernetes.io/autoscaler-test": ""
+    annotations:
+    capacity:
+      cpu: "8"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    allocatable:
+      cpu: "8"
+      memory: "16G"
+      ephemeral-storage: "200G"
+    taints:

@@ -1,0 +1,6 @@
+.idea
+.stignore
+go.sum
+nodegroup-test-config.yaml
+sync.ffs_db
+kube_config
