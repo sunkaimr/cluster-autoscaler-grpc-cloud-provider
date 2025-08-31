@@ -19,6 +19,7 @@ package wrapper
 import (
 	"context"
 	"fmt"
+
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -225,6 +226,10 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 
 	pbInstances := make([]*protos.Instance, 0)
 	for _, ins := range ng.Instances {
+		if ins.ProviderID == "" {
+			continue
+		}
+
 		pbInstance := new(protos.Instance)
 		pbInstance.Id = ins.ProviderID
 		pbInstance.Status = stateMapping(ins)
@@ -238,9 +243,9 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 func stateMapping(ngInstance *instance.Instance) *protos.InstanceStatus {
 	pbStatus := new(protos.InstanceStatus)
 	switch ngInstance.Status {
-	case instance.StatusPending, instance.StatusCreating, instance.StatusCreated, instance.StatusRegistering:
+	case instance.StatusPending, instance.StatusCreating, instance.StatusCreated:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
-	case instance.StatusRegistered, instance.StatusRunning:
+	case instance.StatusRunning:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceRunning
 	case instance.StatusPendingDeletion, instance.StatusDeleting, instance.StatusDeleted:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceDeleting

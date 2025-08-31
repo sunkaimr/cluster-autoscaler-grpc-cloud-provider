@@ -1,18 +1,19 @@
 package instance
 
 import (
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/utils"
 	"time"
+
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/utils"
 )
 
 type Status string
 
 const (
-	StatusPending         Status = "Pending"
-	StatusCreating        Status = "Creating"
-	StatusCreated         Status = "Created"
-	StatusRegistering     Status = "Registering"
-	StatusRegistered      Status = "Registered"
+	StatusPending  Status = "Pending"
+	StatusCreating Status = "Creating"
+	StatusCreated  Status = "Created"
+	//StatusRegistering     Status = "Registering"
+	//StatusRegistered      Status = "Registered"
 	StatusRunning         Status = "Running"
 	StatusPendingDeletion Status = "PendingDeletion"
 	StatusDeleting        Status = "Deleting"
@@ -22,6 +23,7 @@ const (
 )
 
 type Instance struct {
+	ID         string    `json:"id" yaml:"id"`
 	Name       string    `json:"name" yaml:"name"`                             // 节点在kubernetes中的名称
 	IP         string    `json:"ip" yaml:"ip"`                                 // 节点的IP地址
 	ProviderID string    `json:"providerID" yaml:"providerID"`                 // 节点在云上的ID，格式如：externalgrpc://<provider>/<account>/<region>/<instanceID>

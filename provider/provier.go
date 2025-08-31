@@ -1,16 +1,22 @@
 package provider
 
 import (
+	"context"
 	"fmt"
+	"strings"
+
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/providers/tencentcloud"
-	"strings"
 )
 
 var cloudproviderClientCache = make(map[string]Cloudprovider, 10)
 
-type CloudProviderOption map[string]Provider
+type CloudProviderOption struct {
+	Accounts          map[string]Provider          `json:"accounts" yaml:"accounts"`
+	InstanceParameter map[string]InstanceParameter `json:"instanceParameter" yaml:"instanceParameter"`
+}
+
 type Provider map[string]*Credential
 
 type Credential struct {
@@ -18,14 +24,19 @@ type Credential struct {
 	SecretKey string `json:"secretKey" yaml:"secretKey"`
 }
 
+type InstanceParameter struct {
+	ProviderIdTemplate string      `json:"providerIdTemplate" yaml:"providerIdTemplate"`
+	Parameter          interface{} `json:"parameter" yaml:"parameter"`
+}
+
 type Cloudprovider interface {
-	InstanceStatus(instance *Instance) (*Instance, error)
+	InstanceStatus(ctx context.Context, instance *Instance) (*Instance, error)
 
-	InstancesStatus(instances ...*Instance) ([]*Instance, error)
+	InstancesStatus(ctx context.Context, instances ...*Instance) ([]*Instance, error)
 
-	CreateInstance(instance *Instance, para interface{}) (*Instance, error)
+	CreateInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error)
 
-	DeleteInstance(instance *Instance, para interface{}) (*Instance, error)
+	DeleteInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error)
 }
 
 func NewCloudprovider(providerID string, opts CloudProviderOption) (Cloudprovider, error) {
@@ -43,21 +54,21 @@ func NewCloudprovider(providerID string, opts CloudProviderOption) (Cloudprovide
 		return cli, nil
 	}
 
-	if opts == nil {
+	if opts.Accounts == nil {
 		return nil, fmt.Errorf("missing cloudProviderOption config")
 	}
 
-	if opts[provider] == nil {
+	if opts.Accounts[provider] == nil {
 		return nil, fmt.Errorf("missing cloudProviderOption.%s option", provider)
 	}
 
-	if opts[provider][account] == nil {
+	if opts.Accounts[provider][account] == nil {
 		return nil, fmt.Errorf("missing cloudProviderOption.%s.%s.secretId|secretKey  option", provider, account)
 	}
 
 	paras := make(map[string]string, 4)
-	paras["secretId"] = opts[provider][account].SecretId
-	paras["secretKey"] = opts[provider][account].SecretKey
+	paras["secretId"] = opts.Accounts[provider][account].SecretId
+	paras["secretKey"] = opts.Accounts[provider][account].SecretKey
 	paras["region"] = region
 
 	switch provider {

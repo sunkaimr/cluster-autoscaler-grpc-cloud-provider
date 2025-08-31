@@ -1,13 +1,16 @@
 package tencentcloud
 
 import (
+	"context"
 	"fmt"
+	"strings"
+
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
-	"strings"
+	"k8s.io/apimachinery/pkg/util/json"
 )
 
 const (
@@ -40,25 +43,37 @@ func BuildTencentCloudProvider(paras map[string]string) (*Client, error) {
 	return &Client{client: client}, nil
 }
 
-func (c *Client) InstanceStatus(instance *Instance) (*Instance, error) {
-	filterIP := "private-ip-address"
+func (c *Client) InstanceStatus(ctx context.Context, ins *Instance) (*Instance, error) {
+	var limit int64 = int64(100)
+
 	req := cvm.NewDescribeInstancesRequest()
-	filter := &cvm.Filter{
-		Name:   &filterIP,
-		Values: []*string{},
-	}
+	req.Limit = &limit
+	_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
+	req.InstanceIds = append(req.InstanceIds, &instanceID)
 
-	req.Filters = []*cvm.Filter{filter}
-
-	_, err := c.client.DescribeInstances(req)
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("fail to DescribeInstances, %s", err)
+		ins.ErrorMsg = err.Error()
+		return ins, fmt.Errorf("DescribeInstances failed, %s", err)
 	}
 
-	return nil, nil
+	ins.ErrorMsg = "unknown status"
+	for _, respIns := range resp.Response.InstanceSet {
+		if instanceID == *respIns.InstanceId {
+			ins.Status = stateMapping(*respIns.InstanceState)
+			ins.ErrorMsg = ""
+
+			// 如果instance状态正常则更新IP地址
+			if ins.IP == "" && len(respIns.PrivateIpAddresses) > 0 {
+				ins.IP = *respIns.PrivateIpAddresses[0]
+			}
+			break
+		}
+	}
+	return ins, nil
 }
 
-func (c *Client) InstancesStatus(instances ...*Instance) ([]*Instance, error) {
+func (c *Client) InstancesStatus(ctx context.Context, instances ...*Instance) ([]*Instance, error) {
 	var limit int64 = int64(len(instances))
 
 	req := cvm.NewDescribeInstancesRequest()
@@ -68,57 +83,79 @@ func (c *Client) InstancesStatus(instances ...*Instance) ([]*Instance, error) {
 		req.InstanceIds = append(req.InstanceIds, &instanceID)
 	}
 
-	resp, err := c.client.DescribeInstances(req)
-	if err != nil {
-		return nil, fmt.Errorf("fail to DescribeInstances, %s", err)
+	for _, ins := range instances {
+		ins.Status = StatusUnknown
+		ins.ErrorMsg = "unknown status"
 	}
 
-	newIns := make([]*Instance, 0, len(resp.Response.InstanceSet))
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
+	if err != nil {
+		return instances, fmt.Errorf("DescribeInstances failed, %s", err)
+	}
+
 	for _, respIns := range resp.Response.InstanceSet {
 		for _, ins := range instances {
 			_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
-			if instanceID != *respIns.InstanceId {
-				continue
+			if instanceID == *respIns.InstanceId {
+				ins.Status = stateMapping(*respIns.InstanceState)
+				ins.ErrorMsg = ""
+				break
 			}
-
-			newIns = append(newIns, &Instance{
-				Name:       ins.Name,
-				IP:         ins.IP,
-				ProviderID: ins.ProviderID,
-				Status:     stateMapping(*respIns.InstanceState),
-			})
-			break
 		}
 	}
 
 	// 有些instance没有查找到
-	if len(instances) != len(newIns) {
-		notfoudIns := make([]string, 0, len(instances)-len(newIns))
-		for _, ins1 := range instances {
-			exist := false
-			for _, ins2 := range newIns {
-				if ins1.ProviderID == ins2.ProviderID {
-					exist = true
-					break
-				}
-			}
-			if !exist {
-				notfoudIns = append(notfoudIns, fmt.Sprintf("%s:%s", ins1.Name, ins1.ProviderID))
-			}
+	notFoudIns := make([]string, 0, len(instances))
+	for _, ins := range instances {
+		if ins.Status == StatusUnknown {
+			_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
+			notFoudIns = append(notFoudIns, instanceID)
 		}
-
-		return newIns, fmt.Errorf("instance not found: %s", strings.Join(notfoudIns, ","))
 	}
 
-	return newIns, nil
+	if len(notFoudIns) != 0 {
+		return instances, fmt.Errorf("instance status unknown: %s", strings.Join(notFoudIns, ","))
+	}
+
+	return instances, nil
 }
 
-func (c *Client) CreateInstance(instance *Instance, para interface{}) (*Instance, error) {
+func (c *Client) CreateInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error) {
+	req := cvm.NewRunInstancesRequest()
 
-	return nil, nil
+	paraRaw, err := json.Marshal(para)
+	if err != nil {
+		err = fmt.Errorf("marshal instance(%s).instanceParameter failde, %s", instance.ID, err)
+		instance.Status = StatusFailed
+		instance.ErrorMsg = err.Error()
+		return instance, err
+	}
+
+	err = req.FromJsonString(string(paraRaw))
+	if err != nil {
+		err = fmt.Errorf("check instance(%s).instanceParameter failde, %s", instance.ID, err)
+		instance.Status = StatusFailed
+		instance.ErrorMsg = err.Error()
+		return instance, err
+	}
+
+	resp, err := c.client.RunInstancesWithContext(ctx, req)
+	if err != nil {
+		err = fmt.Errorf("create instance(%s) failed, %s", instance.ID, err)
+		instance.Status = StatusFailed
+		instance.ErrorMsg = err.Error()
+		return instance, err
+	}
+
+	if len(resp.Response.InstanceIdSet) > 0 {
+		instance.Status = StatusCreating
+		instance.ProviderID = *resp.Response.InstanceIdSet[0]
+	}
+
+	return instance, nil
 }
 
-func (c *Client) DeleteInstance(instance *Instance, para interface{}) (*Instance, error) {
+func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error) {
 
 	return nil, nil
 }
@@ -141,11 +178,22 @@ func (c *Client) DeleteInstance(instance *Instance, para interface{}) (*Instance
 // EXIT_SERVICE_LIVE_MIGRATE：表示退出在线服务迁移。
 func stateMapping(status string) Status {
 	switch status {
-	case "PENDING", "LAUNCH_FAILED":
+	case "PENDING":
 		return StatusCreating
-	case "RUNNING", "STOPPED", "STARTING", "STOPPING", "REBOOTING", "SHUTDOWN",
-		"ENTER_RESCUE_MODE", "RESCUE_MODE", "EXIT_RESCUE_MODE", "ENTER_SERVICE_LIVE_MIGRATE",
-		"SERVICE_LIVE_MIGRATE", "EXIT_SERVICE_LIVE_MIGRATE":
+	case "LAUNCH_FAILED":
+		return StatusFailed
+	case "RUNNING",
+		"STOPPED",
+		"STARTING",
+		"STOPPING",
+		"REBOOTING",
+		"SHUTDOWN",
+		"ENTER_RESCUE_MODE",
+		"RESCUE_MODE",
+		"EXIT_RESCUE_MODE",
+		"ENTER_SERVICE_LIVE_MIGRATE",
+		"SERVICE_LIVE_MIGRATE",
+		"EXIT_SERVICE_LIVE_MIGRATE":
 		return StatusRunning
 	case "TERMINATING":
 		return StatusDeleting

@@ -2,9 +2,10 @@ package common
 
 import (
 	"fmt"
+	"strings"
+
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	"k8s.io/klog/v2"
-	"strings"
 )
 
 // ExtractProviderID providerID格式如下：externalgrpc://<provider>/<account>/<region>/<instanceID>
@@ -33,6 +34,10 @@ func ExtractProviderID(providerID string) (provider, account, region, instanceID
 	default:
 		return ss[0], ss[1], ss[2], ss[3], nil
 	}
+}
+
+func GenerateInstanceProviderID(provider, account, region, instanceID string) string {
+	return fmt.Sprintf("externalgrpc://%s/%s/%s/%s", provider, account, region, instanceID)
 }
 
 func ClassifiedInstancesByProviderID(ins []*Instance) map[string][]*Instance {
