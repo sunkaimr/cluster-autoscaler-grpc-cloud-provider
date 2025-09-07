@@ -1,11 +1,14 @@
 package nodegroup
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/spf13/viper"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/script_executor"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/queue"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/utils"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider"
@@ -30,6 +34,16 @@ import (
 const (
 	DefaultNodeGroup        = "default"
 	ConfigMapLastUpdatedKey = "cluster-autoscaler.grpc-provider/last-updated"
+
+	AfterCreatedScript = "after_created_hook.sh"
+	BeforeDeleteScript = "before_delete_hook.sh"
+
+	KubeNodeSshUser    = "KUBE_NODE_SSH_USER"
+	KubeNodeSshPasswd  = "KUBE_NODE_SSH_PASSWD"
+	KubeNodeSshKeyPath = "KUBE_NODE_SSH_KEY_PATH"
+	KubeNodeName       = "NODE_NAME"
+	KubeNodeIp         = "NODE_IP"
+	KubeProviderId     = "PROVIDER_ID"
 )
 
 var (
@@ -44,11 +58,9 @@ var (
 			statusConfigMap: "nodegroup-status",
 		},
 		instanceQueue: map[Status]*queue.Queue{
-			StatusPending:  queue.New(),
-			StatusCreating: queue.New(),
-			StatusCreated:  queue.New(),
-			//StatusRegistering:     queue.New(),
-			//StatusRegistered:      queue.New(),
+			StatusPending:         queue.New(),
+			StatusCreating:        queue.New(),
+			StatusCreated:         queue.New(),
 			StatusRunning:         queue.New(),
 			StatusPendingDeletion: queue.New(),
 			StatusDeleting:        queue.New(),
@@ -68,10 +80,9 @@ type nodeGroupCache []*NodeGroup
 
 type NodeGroups struct {
 	sync.Mutex
-	cache               nodeGroupCache
-	updateTime          time.Time
 	instanceQueue       map[Status]*queue.Queue
 	ops                 *nodeGroupsOps
+	cache               nodeGroupCache
 	cloudProviderOption provider.CloudProviderOption
 }
 
@@ -79,30 +90,24 @@ type nodeGroupsOps struct {
 	configFile      string
 	nameSpace       string
 	statusConfigMap string // "nodegroup-status"
+	hooksPath       string
 }
 
 type NodeGroup struct {
 	// 节点池ID
 	Id string `json:"id" yaml:"id"`
-
 	// 节点池内最小节点数量
-	// 如果节点池的TargetSize小于MinSize应该发起扩容
 	MinSize int `json:"minSize" yaml:"minSize"`
-
 	// 节点池内最大节点数量
 	MaxSize int `json:"maxSize" yaml:"maxSize"`
-
 	// 节点池目标节点数量
 	TargetSize int `json:"targetSize" yaml:"targetSize"`
-
-	// 节点列表
-	Instances InstanceList `json:"instances" yaml:"instances"`
-
+	// 匹配节点组的模板
+	NodeTemplate NodeTemplate `json:"nodeTemplate" yaml:"nodeTemplate"`
 	// 创建instance使用到的参数
 	InstanceParameter string `json:"instanceParameter" yaml:"instanceParameter"`
-
-	// 匹配节点租的模板
-	NodeTemplate NodeTemplate `json:"nodeTemplate" yaml:"nodeTemplate"`
+	// 节点列表
+	Instances InstanceList `json:"instances" yaml:"instances"`
 }
 
 type NodeTemplate struct {
@@ -141,7 +146,7 @@ func (c *nodeGroupCache) find(id string) *NodeGroup {
 }
 
 func (ng *NodeGroup) Debug() string {
-	return fmt.Sprintf("%s MinSize:%d MaxSize:%d", ng.Id, ng.MinSize, ng.MaxSize)
+	return fmt.Sprintf("ID:%s MinSize:%d MaxSize:%d TargetSize:%d", ng.Id, ng.MinSize, ng.MaxSize, ng.TargetSize)
 }
 
 func GetNodeGroups() *NodeGroups {
@@ -152,44 +157,80 @@ func GetNodeGroups() *NodeGroups {
 // watch Node 定时更新NodeGroup中Instance信息
 // 定时将当前NodeGroup status持久化到config map中
 // 启动Instance Controller调用云厂商接口实现对Instance控制
-func (ngs *NodeGroups) Run(ctx context.Context, ops ...func()) error {
+func (ngs *NodeGroups) Run(ctx context.Context, ops ...func() error) error {
 	for _, op := range ops {
-		op()
+		if err := op(); err != nil {
+			return err
+		}
 	}
 
 	ngs.loadNodeGroups()
 	runNodeController(ctx)
 
-	go wait.Until(
-		func() {
-			if err := ngs.WriteStatusConfigMap(); err != nil {
-				klog.Error(err)
-			}
-		},
-		time.Second*5,
-		ctx.Done(),
-	)
-
 	go ngs.SyncInstances(ctx)
+	go wait.UntilWithContext(ctx, WriteNodeGroupStatusToConfigMap, time.Second*5)
+	//go WatchConfigMap(ctx, ngs.ops.nameSpace, ngs.ops.statusConfigMap, SyncNodeGroupStatusFromConfigMap)
 
 	return nil
 }
 
-func (ngs *NodeGroups) WithOpsConfigFile(f string) func() {
-	return func() {
+func (ngs *NodeGroups) WithOpsConfigFile(f string) func() error {
+	return func() error {
 		ngs.ops.configFile = f
+		return nil
 	}
 }
 
-func (ngs *NodeGroups) WithOpsNamespace(ns string) func() {
-	return func() {
+func (ngs *NodeGroups) WithOpsNamespace(ns string) func() error {
+	return func() error {
 		ngs.ops.nameSpace = ns
+		return nil
 	}
 }
 
-func (ngs *NodeGroups) WithOpsStatusConfigMap(cm string) func() {
-	return func() {
+func (ngs *NodeGroups) WithOpsStatusConfigMap(cm string) func() error {
+	return func() error {
 		ngs.ops.statusConfigMap = cm
+		return nil
+	}
+}
+
+func (ngs *NodeGroups) WithOpsHooksPath(path string) func() error {
+	return func() error {
+		afterCreatedHook := filepath.Join(path, AfterCreatedScript)
+		if _, err := os.Stat(afterCreatedHook); os.IsNotExist(err) {
+			klog.Warningf("%s not exist", afterCreatedHook)
+		}
+
+		beforeDeleteHook := filepath.Join(path, BeforeDeleteScript)
+		if _, err := os.Stat(afterCreatedHook); os.IsNotExist(err) {
+			klog.Warningf("%s not exist", beforeDeleteHook)
+		}
+
+		ngs.ops.hooksPath = path
+		return nil
+	}
+}
+
+func (ngs *NodeGroups) CheckKubeNodeSshUser() func() error {
+	return func() error {
+		if user := os.Getenv(KubeNodeSshUser); strings.TrimSpace(user) == "" {
+			klog.Warningf("The environment variable '%s', "+
+				"which is used for adding nodes to the Kubernetes cluster via SSH, is not set. "+
+				"This will prevent the successful addition of new nodes to the Kubernetes cluster.", KubeNodeSshUser)
+		}
+		if passwd := os.Getenv(KubeNodeSshPasswd); strings.TrimSpace(passwd) == "" {
+			klog.Warningf("The environment variable '%s', "+
+				"which is used for adding nodes to the Kubernetes cluster via SSH, is not set. "+
+				"This will prevent the successful addition of new nodes to the Kubernetes cluster.", KubeNodeSshPasswd)
+		}
+
+		if key := os.Getenv(KubeNodeSshKeyPath); strings.TrimSpace(key) == "" {
+			klog.Warningf("The environment variable '%s', "+
+				"which is used for adding nodes to the Kubernetes cluster via SSH, is not set. "+
+				"This will prevent the successful addition of new nodes to the Kubernetes cluster.", KubeNodeSshKeyPath)
+		}
+		return nil
 	}
 }
 
@@ -199,6 +240,13 @@ func (ngs *NodeGroups) Length() int {
 
 func (ngs *NodeGroups) CloudProviderOption() provider.CloudProviderOption {
 	return ngs.cloudProviderOption
+}
+
+func (ngs *NodeGroups) InstanceParameter(key string) *provider.InstanceParameter {
+	if v, ok := ngs.cloudProviderOption.InstanceParameter[key]; ok {
+		return &v
+	}
+	return nil
 }
 
 func (ngs *NodeGroups) List() []NodeGroup {
@@ -337,6 +385,7 @@ func (ngs *NodeGroups) NodeGroupIncreaseSize(id string /*nodegroup id*/, num int
 	increaseSize := num
 	if ng.TargetSize+num > ng.MaxSize {
 		increaseSize = ng.MaxSize - ng.TargetSize
+		klog.Warningf("nodegroup(%s) increase instance reached MixSize(%d)", id, ng.MaxSize)
 	}
 
 	ng.TargetSize += increaseSize
@@ -422,7 +471,7 @@ func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
 
 	// instance的IP,ProviderID发生变化
 	ngs.Lock()
-	if ins := ngs.cache.find(matchedNg.Id).Instances.Find(node.Name); ins != nil {
+	if ins := ngs.cache.find(matchedNg.Id).Instances.FindByName(node.Name); ins != nil {
 		newIns := generateInstanceByNode(node)
 		if ins.ProviderID != newIns.ProviderID || ins.IP != newIns.IP {
 			ins.ProviderID = newIns.ProviderID
@@ -434,60 +483,28 @@ func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
 	return nil
 }
 
-// DeleteNode 当watch到k8s中节点不存在后标记nodegroup中对应的Instance为Deleting状态
+// DeleteNode 当watch到k8s中节点不存在后标记nodegroup中对应的Instance为PendingDeletion状态
 func (ngs *NodeGroups) DeleteNode(nodeName string) {
 	ngs.Lock()
+	defer ngs.Unlock()
 
 	for _, ng := range ngs.cache {
-		for i, v := range ng.Instances {
-			if nodeName == v.Name {
-				ng.Instances[i].Status = StatusDeleting
+		for _, ins := range ng.Instances {
+			if nodeName != ins.Name {
+				continue
 			}
+
+			if ins.Status == StatusDeleted {
+				continue
+			}
+
+			ins.Status = StatusPendingDeletion
 		}
 	}
-	ngs.Unlock()
 }
 
 // DeleteNodesInNodeGroup 收到CA的删除NodeGroup中node请求，将对应的Instance标记为Deleting状态
 func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) error {
-	ngs.Lock()
-
-	ng := ngs.cache.find(id)
-	if ng == nil {
-		return NotFoundErr
-
-	}
-
-	// 判断删除后的size是否小于MinSize
-	maxDeletedSize := len(nodeNames)
-	if ng.TargetSize-len(nodeNames) < ng.MinSize {
-		maxDeletedSize = ng.TargetSize - ng.MinSize
-	}
-
-	deleted := 0
-	for i, ins := range ng.Instances {
-		if deleted >= maxDeletedSize {
-			break
-		}
-
-		for _, name := range nodeNames {
-			if ins.Name == name && ins.Status != StatusPendingDeletion {
-				ng.Instances[i].Status = StatusPendingDeletion
-				klog.V(0).Infof("mark nodegroup(%s) node(%s) is PendingDeletion", ng.Id, ins.Name)
-				deleted++
-				break
-			}
-		}
-	}
-
-	ng.TargetSize -= maxDeletedSize
-
-	ngs.Unlock()
-	return nil
-}
-
-// AddInstancesInNodeGroup 收到CA的调添加Node请求，向nodegroup中添加N个instance
-func (ngs *NodeGroups) AddInstancesInNodeGroup(id string, size int) error {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -496,12 +513,43 @@ func (ngs *NodeGroups) AddInstancesInNodeGroup(id string, size int) error {
 		return NotFoundErr
 	}
 
-	for i := 0; i < size; i++ {
-		ng.Instances.Add(&Instance{
-			Status: StatusPending,
-		})
+	// 判断删除后的size是否小于MinSize
+	maxDeletedSize := len(nodeNames)
+	if ng.TargetSize-len(nodeNames) < ng.MinSize {
+		maxDeletedSize = ng.TargetSize - ng.MinSize
+		klog.Warningf("nodegroup(%s) delete instance reached MinSize(%d)", id, ng.MinSize)
 	}
 
+	if maxDeletedSize == 0 {
+		err := fmt.Errorf("nodegroup(%s) has reached MinSize(%d)", id, ng.MinSize)
+		klog.Error(err)
+		return err
+	}
+
+	deleted := 0
+	for _, name := range nodeNames {
+		ins := ng.Instances.FindByName(name)
+		if ins == nil {
+			klog.Warningf("node(%s) not found in nodegroup(%s)", name, id)
+			continue
+		}
+
+		if deleted >= maxDeletedSize {
+			klog.Warningf("node(%s) not found in nodegroup(%s)", name, id)
+			break
+		}
+
+		//if ins.Status == StatusDeleted {
+		//	klog.Warningf("nodegroup(%s) node(%s) status is Deleted",ID, name)
+		//	continue
+		//}
+
+		ins.Status = StatusPendingDeletion
+		ins.ErrorMsg = ""
+		klog.V(0).Infof("nodegroup(%s) node(%s) is %s and marked PendingDeletion", ng.Id, ins.Name, ins.Status)
+		deleted++
+	}
+	ng.TargetSize -= deleted
 	return nil
 }
 
@@ -515,9 +563,32 @@ func (ngs *NodeGroups) DecreaseNodeGroupTargetSize(id string, size int) (int, er
 		return 0, NotFoundErr
 	}
 
-	actuality := ng.Instances.DecreasePending(size)
+	// 判断删除后的size是否小于MinSize
+	maxDecreaseSize := size
+	if ng.TargetSize-size < ng.MinSize {
+		maxDecreaseSize = ng.TargetSize - ng.MinSize
+		klog.Warningf("nodegroup(%s) decrease reached MinSize(%d)", id, ng.MinSize)
+	}
+
+	if maxDecreaseSize == 0 {
+		return 0, nil
+	}
+
+	actuality := ng.Instances.DecreasePending(maxDecreaseSize)
 	ng.TargetSize -= actuality
 	return actuality, nil
+}
+
+// RemoveInstances 将instance从NodeGroup中删除
+func (ngs *NodeGroups) RemoveInstances(ins ...*Instance) {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	for _, in := range ins {
+		for _, ng := range ngs.cache {
+			ng.Instances.Delete(in.ID)
+		}
+	}
 }
 
 func generateInstanceByNode(node *corev1.Node) *Instance {
@@ -526,6 +597,7 @@ func generateInstanceByNode(node *corev1.Node) *Instance {
 	ins.ID = utils.RandStr(8)
 	ins.Name = node.Name
 	ins.ProviderID = node.Spec.ProviderID
+	ins.Status = StatusUnknown
 	for _, addr := range node.Status.Addresses {
 		if addr.Type == "InternalIP" {
 			ins.IP = addr.Address
@@ -598,66 +670,75 @@ func buildGenericLabels(ngt *NodeTemplate, nodeName string) map[string]string {
 
 func (ngs *NodeGroups) toYaml() (string, error) {
 	ngs.Lock()
+	defer ngs.Unlock()
+
 	var ngc NodeGroupsConfig
 	for _, ng := range ngs.cache {
 		ngc.NodeGroups = append(ngc.NodeGroups, *ng)
 	}
 	ngc.CloudProviderOption = ngs.cloudProviderOption
-	ngs.Unlock()
 
-	out, err := yaml.Marshal(ngc)
-	if err != nil {
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	defer encoder.Close()
+
+	encoder.SetIndent(2)
+	if err := encoder.Encode(ngc); err != nil {
 		return "", err
 	}
-
-	return string(out), nil
+	return buf.String(), nil
 }
 
-func (ngs *NodeGroups) WriteStatusConfigMap() error {
-	cmNamespace, cmName := ngs.ops.nameSpace, ngs.ops.statusConfigMap
-	data, err := ngs.toYaml()
+func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
+	ctx.Value("wg").(*sync.WaitGroup).Add(1)
+	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+
+	namespace := GetNodeGroups().ops.nameSpace
+	configmap := GetNodeGroups().ops.statusConfigMap
+
+	data, err := GetNodeGroups().toYaml()
 	if err != nil {
 		err = fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
 		klog.Error(err)
-		return err
+		return
 	}
 
-	maps := kubeClient.CoreV1().ConfigMaps(cmNamespace)
-	configMap, err := maps.Get(context.TODO(), cmName, metav1.GetOptions{})
+	maps := NewKubeClient().CoreV1().ConfigMaps(namespace)
+	configMap, err := maps.Get(ctx, configmap, metav1.GetOptions{})
 	if err != nil && !kubeerrors.IsNotFound(err) {
-		err = fmt.Errorf("get configmap(%s/%s) from apiserver failed, %s", cmNamespace, cmName, err)
+		err = fmt.Errorf("get configmap(%s/%s) from apiserver failed, %s", namespace, configmap, err)
 		klog.Error(err)
-		return err
+		return
 	}
 
 	// config map不存在则创建
 	if err != nil && kubeerrors.IsNotFound(err) {
 		configMap = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Namespace: cmNamespace,
-				Name:      cmName,
+				Namespace: namespace,
+				Name:      configmap,
 				Annotations: map[string]string{
 					ConfigMapLastUpdatedKey: time.Now().Format(time.RFC3339),
 				},
 			},
 			Data: map[string]string{"NodeGroupsConfig": data},
 		}
-		_, err = maps.Create(context.TODO(), configMap, metav1.CreateOptions{})
+		_, err = maps.Create(ctx, configMap, metav1.CreateOptions{})
 		if err != nil {
-			err = fmt.Errorf("create configmap(%s/%s) failed, %s", cmNamespace, cmName, err)
+			err = fmt.Errorf("create configmap(%s/%s) failed, %s", namespace, configmap, err)
 			klog.Error(err)
-			return err
+			return
 		}
-		klog.V(1).Infof("create configmap(%s/%s) success", cmNamespace, cmName)
-		return nil
+		klog.V(1).Infof("create configmap(%s/%s) success", namespace, configmap)
+		return
 	}
 
 	// 根据md5判断内容是否一致, 若一致则无需更新
 	if md5.Sum([]byte(data)) == md5.Sum([]byte(configMap.Data["NodeGroupsConfig"])) {
-		klog.V(5).Infof("configmap(%s/%s) md5 not changed", cmNamespace, cmName)
-		return nil
+		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
+		return
 	} else {
-		klog.V(3).Infof("configmap(%s/%s) md5 changed", cmNamespace, cmName)
+		klog.V(3).Infof("configmap(%s/%s) md5 changed", namespace, configmap)
 	}
 
 	if configMap.ObjectMeta.Annotations == nil {
@@ -667,12 +748,107 @@ func (ngs *NodeGroups) WriteStatusConfigMap() error {
 	configMap.ObjectMeta.Annotations[ConfigMapLastUpdatedKey] = time.Now().Format(time.RFC3339)
 	_, err = maps.Update(context.TODO(), configMap, metav1.UpdateOptions{})
 	if err != nil {
-		err = fmt.Errorf("update configmap(%s/%s) failed, %s", cmNamespace, cmName, err)
+		err = fmt.Errorf("update configmap(%s/%s) failed, %s", namespace, configmap, err)
 		klog.Error(err)
-		return err
+		return
 	}
-	klog.V(3).Infof("update configmap(%s/%s) success", cmNamespace, cmName)
-	return nil
+	klog.V(3).Infof("update configmap(%s/%s) success", namespace, configmap)
+	return
+}
+
+func SyncNodeGroupStatusFromConfigMap(configMap *corev1.ConfigMap) {
+	namespace := configMap.Namespace
+	configmap := configMap.Name
+
+	// NodeGroupStatus已经发生变动，上锁禁止其他地方再修改
+	equel, err := compareConfigMapMd5(configMap)
+	if err != nil {
+		klog.Errorf("compare configmap(%s/%s) md5 failed, %s", namespace, configmap, err)
+		return
+	}
+
+	if equel {
+		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
+		return
+	} else {
+		klog.V(1).Infof("configmap(%s/%s) md5 changed, need sync to NodeGroupStatus", namespace, configmap)
+	}
+
+	ngs := GetNodeGroups()
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	data := configMap.Data["NodeGroupsConfig"]
+	if len(data) == 0 {
+		klog.Errorf("configmap(%s/%s) data.NodeGroupsConfig is null", namespace, configmap)
+		return
+	}
+
+	var ngc NodeGroupsConfig
+	err = yaml.Unmarshal([]byte(data), &ngc)
+	if err != nil {
+		return
+	}
+
+	// TODO 是否再这里做校验
+	ngs.cloudProviderOption = ngc.CloudProviderOption
+	ngs.cache = make(nodeGroupCache, 0, 10)
+	for _, v := range ngc.NodeGroups {
+		ng := v
+		ngs.cache.add(&ng)
+	}
+
+	klog.V(1).Infof("sync to NodeGroupStatus form configmap(%s/%s) success", namespace, configmap)
+	return
+}
+
+// TODO 是否在此处限制configmap哪些字段可以修改，哪些字段不能修改
+func compareConfigMapMd5(configMap *corev1.ConfigMap) (bool, error) {
+	namespace := configMap.Namespace
+	configmap := configMap.Name
+
+	ngs1, err := GetNodeGroups().toYaml()
+	if err != nil {
+		return false, fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
+	}
+
+	data := configMap.Data["NodeGroupsConfig"]
+	if len(data) == 0 {
+		return false, fmt.Errorf("configmap(%s/%s).NodeGroupsConfig is null", namespace, configmap)
+	}
+
+	var ngs1Copy NodeGroupsConfig
+	err = yaml.Unmarshal([]byte(ngs1), &ngs1Copy)
+	if err != nil {
+		return false, fmt.Errorf("unmarshal ngs1 to NodeGroupsConfig failed, %s", err)
+	}
+
+	var ngs2Copy NodeGroupsConfig
+	err = yaml.Unmarshal([]byte(data), &ngs2Copy)
+	if err != nil {
+		return false, fmt.Errorf("unmarshal configmap(%s/%s).NodeGroupsConfig failed, %s", namespace, configmap, err)
+	}
+
+	for i := range ngs1Copy.NodeGroups {
+		for j := range ngs1Copy.NodeGroups[i].Instances {
+			ngs1Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
+		}
+	}
+	for i := range ngs2Copy.NodeGroups {
+		for j := range ngs2Copy.NodeGroups[i].Instances {
+			ngs2Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
+		}
+	}
+
+	cleanedNgs1, err := yaml.Marshal(ngs1Copy)
+	if err != nil {
+		return false, fmt.Errorf("marshal cleaned ngs1 to yaml failed, %s", err)
+	}
+	cleanedNgs2, err := yaml.Marshal(ngs2Copy)
+	if err != nil {
+		return false, fmt.Errorf("marshal cleaned ngs2 to yaml failed, %s", err)
+	}
+	return md5.Sum(cleanedNgs1) == md5.Sum(cleanedNgs2), nil
 }
 
 // 从config map中获取最nodegroup的状态配置
@@ -821,6 +997,7 @@ func (ngs *NodeGroups) UpdateInstanceStatus(ins *Instance) error {
 		for _, v := range ng.Instances {
 			if v.ID == ins.ID {
 				v.Status = ins.Status
+				v.ErrorMsg = ins.ErrorMsg
 				v.UpdateTime = time.Now()
 				return nil
 			}
@@ -838,6 +1015,7 @@ func (ngs *NodeGroups) UpdateInstancesStatus(ins ...*Instance) {
 			for _, i := range ins {
 				if cacheIns.ID == i.ID {
 					cacheIns.Status = i.Status
+					cacheIns.ErrorMsg = i.ErrorMsg
 					cacheIns.UpdateTime = time.Now()
 				}
 			}
@@ -855,6 +1033,7 @@ func (ngs *NodeGroups) UpdateInstances(ins ...*Instance) {
 				if cacheIns.ID == i.ID {
 					cacheIns.Name = i.Name
 					cacheIns.IP = i.IP
+					cacheIns.ProviderID = i.ProviderID
 					cacheIns.Status = i.Status
 					cacheIns.ErrorMsg = i.ErrorMsg
 					cacheIns.UpdateTime = time.Now()
@@ -865,60 +1044,49 @@ func (ngs *NodeGroups) UpdateInstances(ins ...*Instance) {
 }
 
 func (ngs *NodeGroups) SyncInstances(ctx context.Context) {
+	ctx.Value("wg").(*sync.WaitGroup).Add(1)
+	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+
 	// 创建instance流程(限制创建的并发个数)
 	// - 调用云厂商SDK创建instance
 	// - 将Instance状态设置为Creating
 	// - 根据实例ID生成instance的Id
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPending, StatusPending) }, time.Second*3, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPending, StatusPending) }, time.Second*10, ctx.Done())
 
-	// 等待instance的创建完成
-	// - 调用云厂商的接口查询instance的状态
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreating, StatusCreating) }, time.Second*3, ctx.Done())
+	// 已经调用了云厂商接口创建了instance, 等待运行起来
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreating, StatusCreating) }, time.Second*5, ctx.Done())
 
-	// instance创建完成，执行AfterCreated Hook
+	// instance状态已经运行起来，等待执行AfterCratedHook
 	// - 执行AfterCreated Hook, 包含修改内核参数，修改hostname等。Hook需要支持幂等
 	// - 执行kubeadm join流程
 	// - 包含添加label，污点，注册CMDB等
 	// - 当hook执行完成需要将instance状态更改为Running
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreated, StatusCreated) }, time.Second*1, ctx.Done())
-
-	//// instance join k8s集群
-	//// - 执行kubeadm join流程
-	//go wait.Until(func() { routeInstanceByStatus(ngs, StatusRegistering, StatusRegistering) }, time.Second*1, ctx.Done())
-	//
-	//// 加入k8s成功
-	//// - AfterJoin Hook, 包含添加label，污点，注册CMDB等。需要支持幂等
-	//go wait.Until(func() { routeInstanceByStatus(ngs, StatusRegistering, StatusRegistering) }, time.Second*1, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreated, StatusCreated) }, time.Second*5, ctx.Done())
 
 	// 更新Instance的状态
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusRunning, StatusRunning) }, time.Minute*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusRunning, StatusRunning, StatusUnknown, "") }, time.Minute*5, ctx.Done())
 
-	// 待删除的instance
-	// - 执行BeforeDelete Hook, 需要支持幂等
-	// - 当hook执行完成调用云厂商接口删除instance, 状态更改为Deleting
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPendingDeletion, StatusPendingDeletion) }, time.Second*1, ctx.Done())
+	// 删除instance前等待执行BeforeDeleteHook
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPendingDeletion, StatusPendingDeletion) }, time.Second*5, ctx.Done())
 
-	// 等待instance删除完成
-	// - 调用云厂商的接口等待instance删除完成，将instance修改为Deleted
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleting, StatusDeleting) }, time.Second*3, ctx.Done())
+	// BeforeDeleteHook执行成功等待调用云厂商接口删除instance
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleting, StatusDeleting) }, time.Second*5, ctx.Done())
 
-	// instance删除完成，执行AfterDeleted  Hook
-	// - 执行AfterDeleted  Hook, 包含修改解注册CMDB等。Hook需要支持幂等
-	// - 删除nodegroup中的instance
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleted, StatusDeleted) }, time.Second*1, ctx.Done())
+	// 云厂商instance成功，instance记录保留一段时间后删除记录
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleted, StatusDeleted) }, time.Minute, ctx.Done())
 
-	// 下边为具体的处理逻辑
-	go handleRouteInstances(ctx, ngs, StatusPending, createInstance)
-	go handleRouteInstances(ctx, ngs, StatusCreating, waitInstanceCreated)
-	go handleRouteInstances(ctx, ngs, StatusCreated, execAfterCreatedHook)
-	//go handleRouteInstances(ctx, ngs, StatusRegistering, execKubeadmJoin)
-	//go handleRouteInstances(ctx, ngs, StatusRegistered, execAfterJoinHook)
-	go handleRouteInstances(ctx, ngs, StatusRunning, syncInstanceStatus)
-	go handleRouteInstances(ctx, ngs, StatusPendingDeletion, execBeforeDeleteHook)
-	go handleRouteInstances(ctx, ngs, StatusDeleting, waitInstanceDeleted)
-	go handleRouteInstances(ctx, ngs, StatusDeleted, execAfterDeleteHook)
-	go handleRouteInstances(ctx, ngs, StatusFailed, nil)
-	go handleRouteInstances(ctx, ngs, StatusUnknown, nil)
+	// 定时报告状态是Failed的instance
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusFailed, StatusFailed) }, time.Minute, ctx.Done())
+
+	go handleRouteInstances(ctx, ngs, StatusPending, 1, 3, createInstance)
+	go handleRouteInstances(ctx, ngs, StatusCreating, 1, 10, waitInstanceCreated)
+	go handleRouteInstances(ctx, ngs, StatusCreated, 1, 3, execAfterCreatedHook)
+	go handleRouteInstances(ctx, ngs, StatusRunning, 1, 20, syncInstanceStatus)
+	go handleRouteInstances(ctx, ngs, StatusPendingDeletion, 1, 1, execBeforeDeleteHook)
+	go handleRouteInstances(ctx, ngs, StatusDeleting, 1, 3, deleteInstance)
+	go handleRouteInstances(ctx, ngs, StatusDeleted, 1, 10, removeDeletedInstances)
+	go handleRouteInstances(ctx, ngs, StatusFailed, 1, 100, printFailedStatusInstances)
+	//go handleRouteInstances(ctx, ngs, StatusUnknown, nil)
 
 	return
 }
@@ -931,22 +1099,25 @@ func routeInstanceByStatus(ngs *NodeGroups, key Status, status ...Status) {
 	}
 }
 
-func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Status, handle func(context.Context, *NodeGroups, []*Instance)) {
+func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Status, period int, maxSize int, handle func(context.Context, *NodeGroups, []*Instance)) {
+	ctx.Value("wg").(*sync.WaitGroup).Add(1)
+	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+
 	if handle == nil {
-		klog.Errorf("run %s instances status handle failde， handle is nil", key)
+		klog.Errorf("run %s instances status handle failde, handle is nil", key)
 		return
 	}
 
 	klog.V(1).Infof("run %s instances status handle", key)
 
-	tick := time.NewTicker(time.Second * 1)
+	tick := time.NewTicker(time.Second * time.Duration(period))
 	for {
 		select {
 		case <-ctx.Done():
-			klog.V(1).Info("shutdown %s instances status handle", key)
+			klog.V(1).Infof("shutdown %s instances status handle", key)
 			return
 		case <-tick.C:
-			instances := dumpElementsFromQueue(ngs.instanceQueue[key], 50, time.Second)
+			instances := dumpElementsFromQueue(ngs.instanceQueue[key], maxSize, time.Second)
 			if len(instances) == 0 {
 				continue
 			}
@@ -1050,36 +1221,45 @@ func createInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance)
 	for _, ins := range instances {
 		ng, err := GetNodeGroups().FindNodeGroupByInstanceID(ins.ID)
 		if err != nil {
-			klog.Errorf("find nodegroup by instance ID failed, %s", err)
+			err = fmt.Errorf("find nodegroup by instance ID failed, %s", err)
+			ins.ErrorMsg = err.Error()
+			klog.Error(err)
+			ngs.UpdateInstances(ins)
 			continue
 		}
 
-		insParam, ok := GetNodeGroups().CloudProviderOption().InstanceParameter[ng.InstanceParameter]
-		if !ok {
-			klog.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
+		insParam := GetNodeGroups().InstanceParameter(ng.InstanceParameter)
+		if insParam == nil {
+			err = fmt.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
+			ins.ErrorMsg = err.Error()
+			klog.Error(err)
+			ngs.UpdateInstances(ins)
 			continue
 		}
 
 		cp, err := provider.NewCloudprovider(insParam.ProviderIdTemplate, GetNodeGroups().CloudProviderOption())
 		if err != nil {
-			klog.Errorf("NewCloudprovider failed, %s", err)
+			err = fmt.Errorf("NewCloudprovider failed, %s", err)
+			ins.ErrorMsg = err.Error()
+			klog.Error(err)
+			ngs.UpdateInstances(ins)
 			continue
 		}
 
 		klog.V(1).Infof("creatting instance(%s)...", ins.ID)
 
-		ins, err = cp.CreateInstance(ctx, ins, insParam.Parameter)
+		_, err = cp.CreateInstance(ctx, ins, insParam.Parameter)
 		if err != nil {
 			klog.Errorf("create instance(%s) failed, %s", ins.ID, err)
 		} else {
-			provider, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
+			providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
 
-			ins.ProviderID = pcommon.GenerateInstanceProviderID(provider, account, region, ins.ProviderID)
+			ins.ProviderID = pcommon.GenerateInstanceProviderID(providerName, account, region, ins.ProviderID)
 			ins.Status = StatusCreating
+			ins.ErrorMsg = ""
 
 			klog.V(1).Infof("create instance(%s) success, ProviderID:%s", ins.ID, ins.ProviderID)
 		}
-
 		// 更新Instance的状态
 		ngs.UpdateInstances(ins)
 	}
@@ -1088,17 +1268,17 @@ func createInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance)
 // 等待instance状态正常
 func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	// 调用云厂商接口获取instance状态
-	for i, ins := range instances {
+	for _, ins := range instances {
 		cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
 		if err != nil {
-			klog.Errorf("wait instance created failed, %s", err)
+			klog.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
 			continue
 		}
 
 		lastStatus := ins.Status
 		ins, err = cp.InstanceStatus(ctx, ins)
 		if err != nil {
-			klog.Errorf("wait instance(%s) created failed, %s", instances[i].ID, err)
+			klog.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
 		}
 
 		if lastStatus == StatusCreating && ins.Status == StatusRunning {
@@ -1106,7 +1286,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, instances []*Inst
 			if ins.Name == "" && ins.IP != "" {
 				ins.Name = generateInstanceName(ins.IP)
 			}
-			klog.V(1).Infof("wait instance(%s) created success", instances[i].ID)
+			klog.V(1).Infof("wait instance(%s) created success", ins.ID)
 		}
 		// 更新Instance信息
 		ngs.UpdateInstances(ins)
@@ -1114,7 +1294,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, instances []*Inst
 }
 
 func generateInstanceName(ip string) string {
-	// node-y4znao.vm10-2-13-34
+	// node-y4znao.vm1-2-3-4
 	return fmt.Sprintf("node-%s.vm%s", utils.RandStr(6), strings.ReplaceAll(ip, ".", "-"))
 }
 
@@ -1123,79 +1303,186 @@ func generateInstanceName(ip string) string {
 // - 调整内核参数
 func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
+		start := time.Now()
+		klog.V(1).Infof("exec %s for intance(%s)...", AfterCreatedScript, ins.ID)
+		err := execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
+		if err != nil {
+			ins.Status = StatusFailed
+			ins.ErrorMsg = err.Error()
+			klog.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
+		} else {
+			// 设置标签和污点
+			err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
+			if err != nil {
+				ins.Status = StatusFailed
+				ins.ErrorMsg = err.Error()
+				klog.Errorf("patch intance(%s) NodeNodeGroupTemplate failed, cost:%v, %s", ins.ID, time.Since(start), err)
+			} else {
+				ins.Status = StatusRunning
+				ins.ErrorMsg = ""
+				klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
+			}
+		}
 
 		// 更新Instance信息
-		ngs.UpdateInstances(ins)
-	}
-}
+		ngs.UpdateInstancesStatus(ins)
 
-// 执行kubeadm join加入kubernetes集群
-func execKubeadmJoin(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
-	for _, ins := range instances {
-
-		// 更新Instance信息
-		ngs.UpdateInstances(ins)
-	}
-}
-
-// AfterJoin Hook：
-// - 添加Label和污点
-// - 注册CMDB
-func execAfterJoinHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
-	for _, ins := range instances {
-
-		// 更新Instance信息
-		ngs.UpdateInstances(ins)
 	}
 }
 
 // BeforeDelete Hook
-// - 调用云厂商接口删除instance
+// TODO 调用k8s接口删除node
 func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
 	for _, ins := range instances {
-
-		// 更新Instance信息
-		ngs.UpdateInstances(ins)
-	}
-}
-
-// 等待instance状态正常
-func waitInstanceDeleted(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	classifiedIns := pcommon.ClassifiedInstancesByProviderID(instances)
-	// 调用云厂商接口获取instance状态
-	for _, inss := range classifiedIns {
-		if len(inss) == 0 {
-			continue
-		}
-
-		cp, err := provider.NewCloudprovider(inss[0].ProviderID, GetNodeGroups().CloudProviderOption())
+		start := time.Now()
+		klog.V(1).Infof("exec %s for intance(%s)...", BeforeDeleteScript, ins.ID)
+		err := execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
 		if err != nil {
-			klog.Errorf("NewCloudprovider failed, %s", err)
-			continue
+			ins.Status = StatusFailed
+			ins.ErrorMsg = err.Error()
+			klog.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
+		} else {
+			ins.Status = StatusDeleting
+			ins.ErrorMsg = ""
+			klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", BeforeDeleteScript, ins.ID, time.Since(start))
 		}
-
-		for _, ins := range inss {
-			ins, err = cp.InstanceStatus(ctx, ins)
-			if err != nil {
-				klog.Errorf("create instances failed, %s", err)
-			}
-
-			// 更新Instance信息
-			ngs.UpdateInstances(ins)
-		}
+		// 更新Instance信息
+		ngs.UpdateInstances(ins)
 	}
 }
 
-// AfterDeleted Hook：
-// - 解注册CMDB
-func execAfterDeleteHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
+// deleteInstance 调用云厂商接口删除instance
+func deleteInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
+		klog.V(1).Infof("delete intance(%s)...", ins.ID)
+		err := callDeleteInstance(ctx, ngs, ins)
+		if err != nil {
+			ins.Status = StatusFailed
+			ins.ErrorMsg = err.Error()
+			klog.Errorf("delete intance(%s) failed, %s", ins.ID, err)
+		} else {
+			// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
+			ins.Status = StatusDeleted
+			ins.ErrorMsg = ""
+			klog.V(1).Infof("delete intance(%s) success", ins.ID)
+		}
 
 		// 更新Instance信息
 		ngs.UpdateInstances(ins)
 	}
+}
+
+// removeDeletedInstances 移除之前已删除的instance
+func removeDeletedInstances(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
+	for _, ins := range instances {
+		if time.Now().After(ins.UpdateTime.Add(time.Hour * 24 * 7)) {
+			ngs.RemoveInstances(ins)
+			klog.V(1).Infof("remove intance(%s) success", ins.ID)
+		}
+	}
+}
+
+// printFailedStatusInstances 报错错误状态的instance
+func printFailedStatusInstances(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
+	for _, ins := range instances {
+		klog.Errorf("intance(%s) status is: %s, ErrorMsg: %s", ins.ID, ins.Status, ins.ErrorMsg)
+	}
+}
+
+// 调用云厂商接口删除instance
+func callDeleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) error {
+	cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
+	if err != nil {
+		return fmt.Errorf("call provider delete instance(%s) failed, %s", ins.ID, err)
+	}
+
+	klog.V(1).Infof("call provider delete instance(%s)...", ins.ID)
+
+	ins, err = cp.DeleteInstance(ctx, ins, nil)
+	if err != nil {
+		return fmt.Errorf("call provider delete instance(%s) failed, %s", ins.ID, err)
+	}
+
+	return nil
+}
+
+func execHookScript(ctx context.Context, ngs *NodeGroups, ins *Instance, script string, force bool) error {
+	local := path.Join(ngs.ops.hooksPath, script)
+	remoteBaseDir := fmt.Sprintf("/home/%s/kube-node", os.Getenv(KubeNodeSshUser))
+	remote := fmt.Sprintf("%s/hooks/%s", remoteBaseDir, script)
+	envPath := fmt.Sprintf("%s/hooks/env", remoteBaseDir)
+	logPath := strings.TrimSuffix(remote, ".sh") + ".log"
+
+	executor, err := script_executor.NewScriptExecutor(generateSshInfo(ins))
+	if err != nil {
+		err = fmt.Errorf("NewScriptExecutor for %s failed, %s", script, err)
+		klog.Error(err)
+		return err
+	}
+
+	if force {
+		if err = executor.RemoveAll(remoteBaseDir); err != nil {
+			err = fmt.Errorf("remove %s failed, %s", remoteBaseDir, err)
+			klog.Error(err)
+			return err
+		}
+	}
+
+	// 确保不会被重复执行
+	exist, err := executor.FileExist(remote)
+	if err != nil {
+		err = fmt.Errorf("unable to determine if %s has been executed, %s", script, err)
+		klog.Error(err)
+		return err
+	} else if exist {
+		return nil
+	}
+
+	// 注入环境变量
+	err = executor.WriteFile(strings.NewReader(generateEnv(ins)), envPath)
+	if err != nil {
+		err = fmt.Errorf("write AfterCreatedHook env to %s failed, %s", envPath, err)
+		klog.Error(err)
+		return err
+	}
+
+	// 将hook脚本拷贝至目标节点
+	if err = executor.CopyFile(local, remote); err != nil {
+		err = fmt.Errorf("copy %s from %s to %s failed, %s", script, local, remote, err)
+		klog.Error(err)
+		return err
+	}
+
+	// 脚本添加执行权限
+	if _, err = executor.RunCommand(ctx, "chmod +x "+remote); err != nil {
+		err = fmt.Errorf("make %s executable failed, %s", remote, err)
+		klog.Error(err)
+		return err
+	}
+
+	// 执行脚本
+	ctx1, cancel := context.WithTimeout(ctx, time.Minute*15)
+	defer cancel()
+	output, err := executor.ExecuteScript(ctx1, fmt.Sprintf(". %s && %s", envPath, remote), logPath)
+	if err != nil {
+		err = fmt.Errorf("exec %s on %s failed, %s", remote, ins.IP, err)
+		klog.Error(err)
+		klog.Infof(output)
+		return err
+	}
+	klog.V(3).Infof("script %s ouput:\n%s", script, output)
+
+	return nil
+}
+
+func generateSshInfo(ins *Instance) (ip, port, user, passwd, key string) {
+	return ins.IP, "22", os.Getenv(KubeNodeSshUser), os.Getenv(KubeNodeSshPasswd), os.Getenv(KubeNodeSshKeyPath)
+}
+
+func generateEnv(ins *Instance) string {
+	var buffer bytes.Buffer
+	buffer.WriteString(fmt.Sprintf("export %s=%s\n", KubeNodeIp, ins.IP))
+	buffer.WriteString(fmt.Sprintf("export %s=%s\n", KubeNodeName, ins.Name))
+	buffer.WriteString(fmt.Sprintf("export %s=%s\n", KubeProviderId, ins.ProviderID))
+	return buffer.String()
 }

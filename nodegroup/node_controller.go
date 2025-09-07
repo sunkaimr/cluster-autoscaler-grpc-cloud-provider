@@ -3,8 +3,16 @@ package nodegroup
 import (
 	"context"
 	"fmt"
+	"math"
+	"time"
+
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -16,7 +24,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	"time"
 )
 
 type Controller struct {
@@ -118,14 +125,23 @@ func (c *Controller) run(workers int, stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.nodeSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
-	klog.V(0).Info("cache synced")
+	klog.V(0).Info("informer caches synced")
 
 	klog.V(0).Info("Starting workers")
-	// Launch two workers to process Foo resources
 	for i := 0; i < workers; i++ {
 		go wait.Until(c.runWorker, time.Second, stopCh)
 	}
 	klog.V(0).Infof("started %d node controller workers", workers)
+
+	time.Sleep(time.Second)
+	for {
+		if c.workQueue.Len() == 0 {
+			klog.V(0).Info("workQueue handle finished")
+			break
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+
 	return nil
 }
 
@@ -201,4 +217,99 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 	return nil
+}
+
+func patchNodeNodeGroupTemplate(ctx context.Context, ngs *NodeGroups, ins *instance.Instance) error {
+	node, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get node(%s) from apiserver failed, %s", ins.Name, err)
+	}
+
+	ng, err := ngs.FindNodeGroupByInstanceID(ins.ID)
+	if err != nil {
+		return fmt.Errorf("find nodegroup by instance.ID(%s) failed, %s", ins.ID, err)
+	}
+
+	for k, v := range ng.NodeTemplate.Annotations {
+		node.Annotations[k] = v
+	}
+
+	for k, v := range ng.NodeTemplate.Labels {
+		node.Labels[k] = v
+	}
+
+	for _, t := range ng.NodeTemplate.Taints {
+		node.Spec.Taints = append(node.Spec.Taints, t)
+	}
+
+	_, err = kubeClient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("patch node(%s) NodeGroupTemplate failed, %s", ins.Name, err)
+	}
+	return nil
+}
+
+func WatchConfigMap(ctx context.Context, namespace, configmap string, handle func(cm *corev1.ConfigMap)) {
+	retryDelay := time.Second * 5
+	maxRetryDelay := time.Minute * 5
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			err := watchConfigMapWithRetry(ctx, namespace, configmap, handle)
+			if err != nil {
+				klog.Errorf("watch configmap %s/%s failed: %v, retrying in %v", namespace, configmap, err, retryDelay)
+
+				time.Sleep(retryDelay)
+				retryDelay = time.Duration(math.Min(float64(retryDelay*2), float64(maxRetryDelay)))
+				continue
+			}
+
+			retryDelay = time.Second * 5
+		}
+	}
+}
+
+func watchConfigMapWithRetry(ctx context.Context, namespace, configmap string, handle func(cm *corev1.ConfigMap)) error {
+	opts := metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", configmap).String(),
+	}
+
+	w, err := NewKubeClient().CoreV1().ConfigMaps(namespace).Watch(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create watch for %s/%s, %v", namespace, configmap, err)
+	}
+	defer w.Stop()
+
+	klog.Infof("started watching configmap %s/%s", namespace, configmap)
+
+	for {
+		select {
+		case event, ok := <-w.ResultChan():
+			if !ok {
+				return fmt.Errorf("watch configmap %s/%s channel closed", namespace, configmap)
+			}
+
+			switch event.Type {
+			case watch.Modified:
+				if cm, ok := event.Object.(*corev1.ConfigMap); ok {
+					klog.V(3).Infof("ConfigMap %s/%s modified", cm.Namespace, cm.Name)
+					// 处理 configmap 修改
+					handle(cm)
+				}
+			case watch.Added:
+			case watch.Deleted:
+			case watch.Error:
+				if status, ok := event.Object.(*metav1.Status); ok {
+					return fmt.Errorf("watch error for %s/%s, %s", namespace, configmap, status.Message)
+				}
+				return fmt.Errorf("unknown watch error for %s/%s, %v", namespace, configmap, event.Object)
+			}
+		case <-ctx.Done():
+			klog.Infof("stopping watch due to context cancellation")
+			return nil
+		}
+	}
 }

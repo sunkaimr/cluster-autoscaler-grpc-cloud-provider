@@ -20,10 +20,10 @@ log_error() {
 
 # 主函数
 main() {
-    log_info "starting exec after_create_hook script"
+    log_info "starting exec before_delete_hook script"
 
 
-    log_info "exec after_create_hook script successfully"
+    log_info "exec before_delete_hook script successfully"
 }
 
 main

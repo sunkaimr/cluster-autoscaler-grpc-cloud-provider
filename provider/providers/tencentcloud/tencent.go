@@ -156,11 +156,43 @@ func (c *Client) CreateInstance(ctx context.Context, instance *Instance, para in
 }
 
 func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error) {
+	// 先查询如果已经处于待回收状态则返回成功
+	req := cvm.NewDescribeInstancesRequest()
+	var limit int64 = 100
+	req.Limit = &limit
+	provider, account, region, instanceID, _ := ExtractProviderID(instance.ProviderID)
+	req.InstanceIds = append(req.InstanceIds, &instanceID)
 
-	return nil, nil
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
+	if err != nil {
+		return instance, fmt.Errorf("DescribeInstances failed, %s", err)
+	}
+
+	// 找不到对应的实例
+	if len(resp.Response.InstanceSet) == 0 {
+		return instance, fmt.Errorf("instance %s/%s/%s/%s not found", provider, account, region, instanceID)
+	}
+
+	for _, respIns := range resp.Response.InstanceSet {
+		if stateMapping(*respIns.InstanceState) == StatusDeleted {
+			return instance, nil
+		}
+	}
+
+	req1 := cvm.NewTerminateInstancesRequest()
+	_, _, _, instanceID, _ = ExtractProviderID(instance.ProviderID)
+	releasePrepaidDataDisks := true // 释放挂载的数据盘
+	req1.InstanceIds = []*string{&instanceID}
+	req1.ReleasePrepaidDataDisks = &releasePrepaidDataDisks
+
+	_, err = c.client.TerminateInstances(req1)
+	if err != nil {
+		return instance, fmt.Errorf("fail to TerminateInstances, %s", err)
+	}
+	return instance, nil
 }
 
-// instance状态：https://cloud.tencent.com/document/api/213/15753#InstanceStatus
+// InstanceStatus: instance状态：https://cloud.tencent.com/document/api/213/15753#InstanceStatus
 // PENDING：表示创建中
 // LAUNCH_FAILED：表示创建失败
 // RUNNING：表示运行中
@@ -176,6 +208,11 @@ func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, para in
 // ENTER_SERVICE_LIVE_MIGRATE：表示进入在线服务迁移
 // SERVICE_LIVE_MIGRATE：表示在线服务迁移中
 // EXIT_SERVICE_LIVE_MIGRATE：表示退出在线服务迁移。
+// ==============================
+// RestrictState实例业务状态。取值范围：
+// NORMAL：表示正常状态的实例
+// EXPIRED：表示过期的实例
+// PROTECTIVELY_ISOLATED：表示被安全隔离的实例
 func stateMapping(status string) Status {
 	switch status {
 	case "PENDING":
@@ -187,7 +224,6 @@ func stateMapping(status string) Status {
 		"STARTING",
 		"STOPPING",
 		"REBOOTING",
-		"SHUTDOWN",
 		"ENTER_RESCUE_MODE",
 		"RESCUE_MODE",
 		"EXIT_RESCUE_MODE",
@@ -195,8 +231,8 @@ func stateMapping(status string) Status {
 		"SERVICE_LIVE_MIGRATE",
 		"EXIT_SERVICE_LIVE_MIGRATE":
 		return StatusRunning
-	case "TERMINATING":
-		return StatusDeleting
+	case "TERMINATING", "SHUTDOWN":
+		return StatusDeleted
 	default:
 		return StatusUnknown
 	}

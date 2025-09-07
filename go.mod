@@ -7,7 +7,7 @@ require (
 	github.com/spf13/viper v1.4.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm v1.1.0
-	golang.org/x/crypto v0.35.0
+	golang.org/x/crypto v0.19.0
 	google.golang.org/grpc v1.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.25.0

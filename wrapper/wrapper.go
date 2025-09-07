@@ -153,14 +153,14 @@ func (_ *Wrapper) NodeGroupIncreaseSize(_ context.Context, req *protos.NodeGroup
 
 	id := req.GetId()
 
-	klog.V(0).Infof("got NodeGroupIncreaseSize request: nodegroup(%s) should add %d node(s)", id, req.GetDelta())
+	klog.V(0).Infof("got NodeGroupIncreaseSize request: nodegroup(%s) request add %d node", id, req.GetDelta())
 
-	num, err := nodegroup.GetNodeGroups().NodeGroupIncreaseSize(id, int(req.GetDelta()))
+	actuality, err := nodegroup.GetNodeGroups().NodeGroupIncreaseSize(id, int(req.GetDelta()))
 	if err != nil {
 		return &protos.NodeGroupIncreaseSizeResponse{}, err
 	}
 
-	klog.V(0).Infof("nodegroup(%s) has add %d node(s)", id, num)
+	klog.V(0).Infof("nodegroup(%s) request increase %d node actual increase %d node", id, req.GetDelta(), actuality)
 
 	return &protos.NodeGroupIncreaseSizeResponse{}, err
 }
@@ -177,7 +177,7 @@ func (_ *Wrapper) NodeGroupDeleteNodes(_ context.Context, req *protos.NodeGroupD
 		nodes = append(nodes, v.Name)
 	}
 
-	klog.V(0).Infof("got NodeGroupDeleteNodes request: nodegroup(%s) should delete %d node %v", id, len(req.GetNodes()), nodes)
+	klog.V(0).Infof("got NodeGroupDeleteNodes request: nodegroup(%s) request delete node: %v", id, nodes)
 
 	err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroup(id, nodes...)
 	if err != nil {
@@ -197,17 +197,17 @@ func (_ *Wrapper) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.Nod
 	id := req.GetId()
 	ngs := nodegroup.GetNodeGroups()
 
-	klog.V(0).Infof("got NodeGroupDecreaseTargetSize request: nodegroup(%s) should decrease %d nodes", id, req.GetDelta())
+	klog.V(0).Infof("got NodeGroupDecreaseTargetSize request: nodegroup(%s) decrease %d node", id, req.GetDelta())
 
 	// 如果还有未加入集群的节点则不再加入并走回收节点流程
 	actuality, err := ngs.DecreaseNodeGroupTargetSize(id, int(req.GetDelta()))
 	if err != nil {
-		err = fmt.Errorf("nodegroup(%s) decrease %d node(s) failed, %s", id, req.GetDelta(), err)
+		err = fmt.Errorf("nodegroup(%s) decrease %d node failed, %s", id, req.GetDelta(), err)
 		klog.Error(err)
 		return &protos.NodeGroupDecreaseTargetSizeResponse{}, err
 	}
 
-	klog.V(0).Infof("nodegroup(%s) should decrease %d node(s) actual(%d)", id, req.GetDelta(), actuality)
+	klog.V(0).Infof("nodegroup(%s) request decrease %d node actual decrease %d node", id, req.GetDelta(), actuality)
 
 	return &protos.NodeGroupDecreaseTargetSizeResponse{}, nil
 }
@@ -230,6 +230,10 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 			continue
 		}
 
+		if ins.Status == instance.StatusDeleted {
+			continue
+		}
+
 		pbInstance := new(protos.Instance)
 		pbInstance.Id = ins.ProviderID
 		pbInstance.Status = stateMapping(ins)
@@ -243,14 +247,26 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 func stateMapping(ngInstance *instance.Instance) *protos.InstanceStatus {
 	pbStatus := new(protos.InstanceStatus)
 	switch ngInstance.Status {
-	case instance.StatusPending, instance.StatusCreating, instance.StatusCreated:
+	case instance.StatusPending:
+		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
+	case instance.StatusCreating:
+		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
+	case instance.StatusCreated:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
 	case instance.StatusRunning:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceRunning
-	case instance.StatusPendingDeletion, instance.StatusDeleting, instance.StatusDeleted:
+	case instance.StatusPendingDeletion:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceDeleting
+	case instance.StatusDeleting:
+		pbStatus.InstanceState = protos.InstanceStatus_instanceDeleting
+	case instance.StatusDeleted:
+		pbStatus.InstanceState = protos.InstanceStatus_unspecified
 	case instance.StatusFailed, instance.StatusUnknown:
-		fallthrough
+		pbStatus.InstanceState = protos.InstanceStatus_unspecified
+		pbStatus.ErrorInfo = &protos.InstanceErrorInfo{
+			ErrorCode:    ngInstance.ErrorMsg,
+			ErrorMessage: ngInstance.ErrorMsg,
+		}
 	default:
 		pbStatus.InstanceState = protos.InstanceStatus_unspecified
 		pbStatus.ErrorInfo = &protos.InstanceErrorInfo{

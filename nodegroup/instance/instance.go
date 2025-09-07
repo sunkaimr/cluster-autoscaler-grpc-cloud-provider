@@ -9,17 +9,15 @@ import (
 type Status string
 
 const (
-	StatusPending  Status = "Pending"
-	StatusCreating Status = "Creating"
-	StatusCreated  Status = "Created"
-	//StatusRegistering     Status = "Registering"
-	//StatusRegistered      Status = "Registered"
-	StatusRunning         Status = "Running"
-	StatusPendingDeletion Status = "PendingDeletion"
-	StatusDeleting        Status = "Deleting"
-	StatusDeleted         Status = "Deleted"
-	StatusFailed          Status = "Failed"
-	StatusUnknown         Status = "Unknown"
+	StatusPending         Status = "Pending"         // 等待创建instance
+	StatusCreating        Status = "Creating"        // 已经调用了云厂商接口创建了instance, 等待运行起来
+	StatusCreated         Status = "Created"         // instance状态已经运行起来，等待执行AfterCratedHook
+	StatusRunning         Status = "Running"         // instance状态已经运行起来,AfterCratedHook执行成功
+	StatusPendingDeletion Status = "PendingDeletion" // 删除instance前等待执行BeforeDeleteHook
+	StatusDeleting        Status = "Deleting"        // BeforeDeleteHook执行成功等待调用云厂商接口删除instance
+	StatusDeleted         Status = "Deleted"         // 云厂商instance成功，instance记录保留一段时间后删除记录
+	StatusFailed          Status = "Failed"          // instance状态流转过程中失败了
+	StatusUnknown         Status = "Unknown"         // 查询不到instance的状态
 )
 
 type Instance struct {
@@ -36,23 +34,36 @@ type InstanceList []*Instance
 
 func (c *InstanceList) Add(ins *Instance) {
 	for _, v := range *c {
-		if v.Name != "" && v.Name == ins.Name {
+		if v.ID == ins.ID {
 			return
 		}
 	}
 	*c = append(*c, ins)
 }
 
-func (c *InstanceList) Delete(insName string) {
+func (c *InstanceList) Delete(id string) {
 	for i, v := range *c {
-		if v.Name != "" && v.Name == insName {
-			*c = append((*c)[:i], (*c)[i:]...)
+		if v.ID == id {
+			if i == len(*c) {
+				*c = (*c)[:i]
+				return
+			}
+			*c = append((*c)[:i], (*c)[i+1:]...)
 			return
 		}
 	}
 }
 
-func (c *InstanceList) Find(insName string) *Instance {
+func (c *InstanceList) Find(id string) *Instance {
+	for i, v := range *c {
+		if v.ID == id {
+			return (*c)[i]
+		}
+	}
+	return nil
+}
+
+func (c *InstanceList) FindByName(insName string) *Instance {
 	for i, v := range *c {
 		if v.Name != "" && v.Name == insName {
 			return (*c)[i]
@@ -65,11 +76,11 @@ func (c *InstanceList) Find(insName string) *Instance {
 func (c *InstanceList) DecreasePending(num int) int /*实际减少的数量*/ {
 	deleteIdx := make([]int, 0, len(*c))
 	for i, v := range *c {
-		if v.Name == "" && v.Status == StatusPending {
-			deleteIdx = append(deleteIdx, i)
-		}
 		if len(deleteIdx) >= num {
 			break
+		}
+		if (v.Status == StatusPending) || (v.Status == StatusFailed && v.ProviderID == "") {
+			deleteIdx = append(deleteIdx, i)
 		}
 	}
 
