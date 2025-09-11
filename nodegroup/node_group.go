@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 	"math/rand"
 	"os"
 	"path"
@@ -45,6 +46,17 @@ const (
 	KubeNodeIp         = "NODE_IP"
 	KubeProviderId     = "PROVIDER_ID"
 )
+
+var KubeReservedTaints = []string{
+	corev1.TaintNodeNotReady,
+	corev1.TaintNodeUnreachable,
+	corev1.TaintNodeUnschedulable,
+	corev1.TaintNodeMemoryPressure,
+	corev1.TaintNodeDiskPressure,
+	corev1.TaintNodeNetworkUnavailable,
+	corev1.TaintNodePIDPressure,
+	corev1.TaintNodeOutOfService,
+}
 
 var (
 	NotFoundErr        = errors.New("not found nodegroup")
@@ -87,10 +99,12 @@ type NodeGroups struct {
 }
 
 type nodeGroupsOps struct {
-	configFile      string
-	nameSpace       string
-	statusConfigMap string // "nodegroup-status"
-	hooksPath       string
+	configFile        string
+	nameSpace         string
+	statusConfigMap   string // "nodegroup-status"
+	hooksPath         string
+	createParallelism int
+	deleteParallelism int
 }
 
 type NodeGroup struct {
@@ -102,8 +116,10 @@ type NodeGroup struct {
 	MaxSize int `json:"maxSize" yaml:"maxSize"`
 	// 节点池目标节点数量
 	TargetSize int `json:"targetSize" yaml:"targetSize"`
+	//
+	AutoscalingOptions *AutoscalingOptions `json:"autoscalingOptions" yaml:"autoscalingOptions"`
 	// 匹配节点组的模板
-	NodeTemplate NodeTemplate `json:"nodeTemplate" yaml:"nodeTemplate"`
+	NodeTemplate *NodeTemplate `json:"nodeTemplate" yaml:"nodeTemplate"`
 	// 创建instance使用到的参数
 	InstanceParameter string `json:"instanceParameter" yaml:"instanceParameter"`
 	// 节点列表
@@ -116,6 +132,13 @@ type NodeTemplate struct {
 	Capacity    map[string]string `json:"capacity" yaml:"capacity"`
 	Allocatable map[string]string `json:"allocatable,omitempty" yaml:"allocatable"`
 	Taints      []corev1.Taint    `json:"taints,omitempty" yaml:"taints"`
+}
+
+type AutoscalingOptions struct {
+	ScaleDownUtilizationThreshold    float64       `json:"scaleDownUtilizationThreshold,omitempty" yaml:"scaleDownUtilizationThreshold,omitempty"`
+	ScaleDownGpuUtilizationThreshold float64       `json:"scaleDownGpuUtilizationThreshold,omitempty" yaml:"scaleDownGpuUtilizationThreshold,omitempty"`
+	ScaleDownUnneededTime            time.Duration `json:"scaleDownUnneededTime,omitempty" yaml:"scaleDownUnneededTime,omitempty"`
+	ScaleDownUnreadyTime             time.Duration `json:"scaleDownUnreadyTime,omitempty" yaml:"scaleDownUnreadyTime,omitempty"`
 }
 
 func (c *nodeGroupCache) add(ng *NodeGroup) {
@@ -146,7 +169,7 @@ func (c *nodeGroupCache) find(id string) *NodeGroup {
 }
 
 func (ng *NodeGroup) Debug() string {
-	return fmt.Sprintf("ID:%s MinSize:%d MaxSize:%d TargetSize:%d", ng.Id, ng.MinSize, ng.MaxSize, ng.TargetSize)
+	return fmt.Sprintf("id:%s minSize:%d maxSize:%d targetSize:%d", ng.Id, ng.MinSize, ng.MaxSize, ng.TargetSize)
 }
 
 func GetNodeGroups() *NodeGroups {
@@ -165,9 +188,10 @@ func (ngs *NodeGroups) Run(ctx context.Context, ops ...func() error) error {
 	}
 
 	ngs.loadNodeGroups()
+	// 等待node controller运行成功
 	runNodeController(ctx)
 
-	go ngs.SyncInstances(ctx)
+	go ngs.runInstancesController(ctx)
 	go wait.UntilWithContext(ctx, WriteNodeGroupStatusToConfigMap, time.Second*5)
 	//go WatchConfigMap(ctx, ngs.ops.nameSpace, ngs.ops.statusConfigMap, SyncNodeGroupStatusFromConfigMap)
 
@@ -208,6 +232,20 @@ func (ngs *NodeGroups) WithOpsHooksPath(path string) func() error {
 		}
 
 		ngs.ops.hooksPath = path
+		return nil
+	}
+}
+
+func (ngs *NodeGroups) WithCreateParallelism(para int) func() error {
+	return func() error {
+		ngs.ops.createParallelism = para
+		return nil
+	}
+}
+
+func (ngs *NodeGroups) WithDeleteParallelism(para int) func() error {
+	return func() error {
+		ngs.ops.deleteParallelism = para
 		return nil
 	}
 }
@@ -268,6 +306,17 @@ func (ngs *NodeGroups) MatchNodeGroup(node *corev1.Node) (NodeGroup, error) {
 	ngs.Lock()
 	defer ngs.Unlock()
 
+	genTaintKeys := func(taints []corev1.Taint) []string {
+		keys := make([]string, 0, len(taints))
+		for _, t := range taints {
+			if utils.ElementExist(t.Key, KubeReservedTaints) {
+				continue
+			}
+			keys = append(keys, fmt.Sprintf("%s=%s:%s", t.Key, t.Value, t.Effect))
+		}
+		return keys
+	}
+
 	for _, ng := range ngs.cache {
 		if ng.Id == DefaultNodeGroup {
 			continue
@@ -283,23 +332,7 @@ func (ngs *NodeGroups) MatchNodeGroup(node *corev1.Node) (NodeGroup, error) {
 			continue
 		}
 
-		genNodeTaintKeys := func(node *corev1.Node) []string {
-			keys := make([]string, 0, len(node.Spec.Taints))
-			for _, t := range node.Spec.Taints {
-				keys = append(keys, fmt.Sprintf("%s=%s:%s", t.Key, t.Value, t.Effect))
-			}
-			return keys
-		}
-
-		genNodeGroupTaintKeys := func(ng *NodeGroup) []string {
-			keys := make([]string, 0, len(ng.NodeTemplate.Taints))
-			for _, t := range ng.NodeTemplate.Taints {
-				keys = append(keys, fmt.Sprintf("%s=%s:%s", t.Key, t.Value, t.Effect))
-			}
-			return keys
-		}
-
-		if !utils.IsSubSlices(genNodeTaintKeys(node), genNodeGroupTaintKeys(ng)) {
+		if !utils.IsSubSlices(genTaintKeys(node.Spec.Taints), genTaintKeys(ng.NodeTemplate.Taints)) {
 			continue
 		}
 		matchNg = append(matchNg, *ng)
@@ -323,15 +356,28 @@ func (ngs *NodeGroups) FindNodeGroupByNodeName(nodeName string) (NodeGroup, erro
 	ngs.Lock()
 	defer ngs.Unlock()
 
+	var matchedNg []NodeGroup
 	for _, ng := range ngs.cache {
 		for _, v := range ng.Instances {
 			if v.Name == nodeName {
-				return *ng, nil
+				matchedNg = append(matchedNg, *ng)
 			}
 		}
 	}
 
-	return NodeGroup{}, NotFoundErr
+	switch len(matchedNg) {
+	case 0:
+		return NodeGroup{}, NotFoundErr
+	case 1:
+		return matchedNg[0], nil
+	default:
+		var ns []string
+		for _, v := range matchedNg {
+			ns = append(ns, v.Id)
+		}
+		klog.Errorf("node(%s) belongs to multiple nodegroups %v, %s", nodeName, ns, MatchedMultipleErr)
+		return matchedNg[0], MatchedMultipleErr
+	}
 }
 
 func (ngs *NodeGroups) FindNodeGroupByInstanceID(id string) (NodeGroup, error) {
@@ -408,42 +454,65 @@ func (ngs *NodeGroups) GetNodeGroupTargetSize(id string /*nodegroup id*/) (int, 
 	ngs.Lock()
 	defer ngs.Unlock()
 
-	if ng := ngs.cache.find(id); ng == nil {
+	ng := ngs.cache.find(id)
+	if ng == nil {
 		return 0, NotFoundErr
-	} else {
-		return ng.TargetSize, nil
 	}
+	return ng.TargetSize, nil
+
 }
 
-// UpdateNodeInNodeGroup 需要考虑的几个事情：
+//func (ngs *NodeGroups) RefreshTargetSize() {
+//	ngs.Lock()
+//	defer ngs.Unlock()
+//
+//	// 刷新TargetSize
+//	for _, ng := range ngs.cache {
+//		size := 0
+//		for _, ins := range ng.Instances {
+//			if ins.Status == StatusDeleted {
+//				continue
+//			}
+//			size++
+//		}
+//		ng.TargetSize = size
+//	}
+//}
+
+// UpdateNodeInNodeGroup 需要考虑：
 // 1，首次启动时node相对应instance不存在 => 创建Instance
 // 2，node标签或污点被修改导致instance所属NodeGroup发生改变
 func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
-	// 更新NodeGroup.Nodes节点信息
-
+	// 更新NodeGroup.Instances的归属信息
 	ng, err := ngs.FindNodeGroupByNodeName(node.Name)
-	if err != nil && errors.Is(err, NotFoundErr) {
-		// 首次启动时node相对应instance不存在
-		// 创建Instance，设置Instance的Nam, ProviderID, Ip
-		ng, err = ngs.MatchNodeGroup(node)
-		if err != nil {
-			// 找到了多个怎么办
-			err = fmt.Errorf("match nodegroup failed, %w", err)
-			klog.Error(err)
-			return err
+	if err != nil {
+		if errors.Is(err, NotFoundErr) {
+			// 首次启动时node相对应instance不存在, 创建Instance，设置Instance的Name, ProviderID, Ip
+			ng, err = ngs.MatchNodeGroup(node)
+			if err != nil {
+				err = fmt.Errorf("match nodegroup failed, %w", err)
+				klog.Error(err)
+				return err
+			}
+
+			ngs.Lock()
+			if ngs.cache.find(ng.Id) == nil {
+				ngs.Unlock()
+				err = fmt.Errorf("NodeGroup(%s) not exist", ng.Id)
+				klog.Error(err)
+				return err
+			} else {
+				ngs.cache.find(ng.Id).Instances.Add(generateInstanceByNode(node))
+				ngs.Unlock()
+				klog.V(5).Infof("add node(%s) to NodeGroup(%s)", node.Name, ng.Id)
+			}
+			return nil
 		}
 
-		ngs.Lock()
-		if ngs.cache.find(ng.Id) == nil {
-			ngs.Unlock()
-			err = fmt.Errorf("NodeGroup(%s) not exist", ng.Id)
-			klog.Error(err)
+		if errors.Is(err, MatchedMultipleErr) {
+			// 正常不应该运行到此处
 			return err
-		} else {
-			ngs.cache.find(ng.Id).Instances.Add(generateInstanceByNode(node))
-			ngs.Unlock()
 		}
-		return nil
 	}
 
 	// node标签或污点被修改导致instance所属NodeGroup发生改变
@@ -455,18 +524,19 @@ func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
 	// node所属nodegroup发生改变了, 删除ng中的instance，将node添加到matchedNg的instance中
 	if ng.Id != matchedNg.Id {
 		ngs.Lock()
-		if ngs.cache.find(ng.Id) != nil {
+		if ngs.cache.find(ng.Id) == nil {
 			klog.Warningf("nodegroup(%s) not found", ng.Id)
 		} else {
-			ngs.cache.find(ng.Id).Instances.Delete(node.Name)
+			ngs.cache.find(ng.Id).Instances.DeleteByName(node.Name)
 		}
 
-		if ngs.cache.find(matchedNg.Id) != nil {
+		if ngs.cache.find(matchedNg.Id) == nil {
 			klog.Warningf("nodegroup(%s) not found", matchedNg.Id)
 		} else {
 			ngs.cache.find(matchedNg.Id).Instances.Add(generateInstanceByNode(node))
 		}
 		ngs.Unlock()
+		klog.V(5).Infof("node(%s) has changed its nodegroup from %s to %s", node.Name, ng.Id, matchedNg.Id)
 	}
 
 	// instance的IP,ProviderID发生变化
@@ -608,7 +678,7 @@ func generateInstanceByNode(node *corev1.Node) *Instance {
 
 func BuildNodeFromTemplate(ng *NodeGroup) *corev1.Node {
 	ngName := ng.Id
-	ngt := &ng.NodeTemplate
+	ngt := ng.NodeTemplate
 	node := corev1.Node{}
 	nodeName := fmt.Sprintf("%s-%d", ngName, rand.Int63())
 
@@ -690,8 +760,8 @@ func (ngs *NodeGroups) toYaml() (string, error) {
 }
 
 func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
-	ctx.Value("wg").(*sync.WaitGroup).Add(1)
-	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
 	namespace := GetNodeGroups().ops.nameSpace
 	configmap := GetNodeGroups().ops.statusConfigMap
@@ -945,7 +1015,7 @@ func (ngs *NodeGroups) loadNodeGroups() {
 			MaxSize:    1000,
 			TargetSize: 0,
 			Instances:  make([]*Instance, 0),
-			NodeTemplate: NodeTemplate{
+			NodeTemplate: &NodeTemplate{
 				Labels:      make(map[string]string),
 				Annotations: make(map[string]string),
 				Capacity: map[string]string{
@@ -1043,46 +1113,46 @@ func (ngs *NodeGroups) UpdateInstances(ins ...*Instance) {
 	}
 }
 
-func (ngs *NodeGroups) SyncInstances(ctx context.Context) {
-	ctx.Value("wg").(*sync.WaitGroup).Add(1)
-	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
 	// 创建instance流程(限制创建的并发个数)
 	// - 调用云厂商SDK创建instance
 	// - 将Instance状态设置为Creating
 	// - 根据实例ID生成instance的Id
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPending, StatusPending) }, time.Second*10, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPending /*key*/, StatusPending) }, time.Second*10, ctx.Done())
 
 	// 已经调用了云厂商接口创建了instance, 等待运行起来
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreating, StatusCreating) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreating /*key*/, StatusCreating) }, time.Second*5, ctx.Done())
 
 	// instance状态已经运行起来，等待执行AfterCratedHook
 	// - 执行AfterCreated Hook, 包含修改内核参数，修改hostname等。Hook需要支持幂等
 	// - 执行kubeadm join流程
 	// - 包含添加label，污点，注册CMDB等
 	// - 当hook执行完成需要将instance状态更改为Running
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreated, StatusCreated) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusCreated /*key*/, StatusCreated) }, time.Second*5, ctx.Done())
 
 	// 更新Instance的状态
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusRunning, StatusRunning, StatusUnknown, "") }, time.Minute*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusRunning /*key*/, StatusRunning, StatusUnknown, "") }, time.Minute*5, ctx.Done())
 
 	// 删除instance前等待执行BeforeDeleteHook
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPendingDeletion, StatusPendingDeletion) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusPendingDeletion /*key*/, StatusPendingDeletion) }, time.Second*5, ctx.Done())
 
 	// BeforeDeleteHook执行成功等待调用云厂商接口删除instance
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleting, StatusDeleting) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleting /*key*/, StatusDeleting) }, time.Second*5, ctx.Done())
 
 	// 云厂商instance成功，instance记录保留一段时间后删除记录
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleted, StatusDeleted) }, time.Minute, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusDeleted /*key*/, StatusDeleted) }, time.Minute, ctx.Done())
 
 	// 定时报告状态是Failed的instance
-	go wait.Until(func() { routeInstanceByStatus(ngs, StatusFailed, StatusFailed) }, time.Minute, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StatusFailed /*key*/, StatusFailed) }, time.Minute, ctx.Done())
 
-	go handleRouteInstances(ctx, ngs, StatusPending, 1, 3, createInstance)
+	go handleRouteInstances(ctx, ngs, StatusPending, 1, ngs.ops.createParallelism, createInstance)
 	go handleRouteInstances(ctx, ngs, StatusCreating, 1, 10, waitInstanceCreated)
 	go handleRouteInstances(ctx, ngs, StatusCreated, 1, 3, execAfterCreatedHook)
 	go handleRouteInstances(ctx, ngs, StatusRunning, 1, 20, syncInstanceStatus)
-	go handleRouteInstances(ctx, ngs, StatusPendingDeletion, 1, 1, execBeforeDeleteHook)
+	go handleRouteInstances(ctx, ngs, StatusPendingDeletion, 1, ngs.ops.deleteParallelism, execBeforeDeleteHook)
 	go handleRouteInstances(ctx, ngs, StatusDeleting, 1, 3, deleteInstance)
 	go handleRouteInstances(ctx, ngs, StatusDeleted, 1, 10, removeDeletedInstances)
 	go handleRouteInstances(ctx, ngs, StatusFailed, 1, 100, printFailedStatusInstances)
@@ -1100,8 +1170,8 @@ func routeInstanceByStatus(ngs *NodeGroups, key Status, status ...Status) {
 }
 
 func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Status, period int, maxSize int, handle func(context.Context, *NodeGroups, []*Instance)) {
-	ctx.Value("wg").(*sync.WaitGroup).Add(1)
-	defer ctx.Value("wg").(*sync.WaitGroup).Done()
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
 	if handle == nil {
 		klog.Errorf("run %s instances status handle failde, handle is nil", key)
@@ -1133,6 +1203,10 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Status, peri
 // 在t时间内从队列中获取size个元素(不会从队列中删除)
 func dumpElementsFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
 	if q == nil {
+		return nil
+	}
+
+	if maxSize <= 0 {
 		return nil
 	}
 
@@ -1248,8 +1322,12 @@ func createInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance)
 
 		klog.V(1).Infof("creatting instance(%s)...", ins.ID)
 
-		_, err = cp.CreateInstance(ctx, ins, insParam.Parameter)
+		ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
+		defer cancel()
+		_, err = cp.CreateInstance(ctx1, ins, insParam.Parameter)
 		if err != nil {
+			ins.Status = StatusFailed
+			ins.ErrorMsg = err.Error()
 			klog.Errorf("create instance(%s) failed, %s", ins.ID, err)
 		} else {
 			providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
@@ -1262,6 +1340,11 @@ func createInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance)
 		}
 		// 更新Instance的状态
 		ngs.UpdateInstances(ins)
+
+		select {
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -1326,12 +1409,10 @@ func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, instances []*Ins
 
 		// 更新Instance信息
 		ngs.UpdateInstancesStatus(ins)
-
 	}
 }
 
 // BeforeDelete Hook
-// TODO 调用k8s接口删除node
 func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
 		start := time.Now()
@@ -1355,27 +1436,46 @@ func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, instances []*Ins
 func deleteInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
 		klog.V(1).Infof("delete intance(%s)...", ins.ID)
-		err := callDeleteInstance(ctx, ngs, ins)
+
+		ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
+		err := callDeleteInstance(ctx1, ngs, ins)
+		cancel()
 		if err != nil {
 			ins.Status = StatusFailed
 			ins.ErrorMsg = err.Error()
 			klog.Errorf("delete intance(%s) failed, %s", ins.ID, err)
 		} else {
+			klog.V(1).Infof("delete intance(%s) success", ins.ID)
+
+			err = DeleteNodeFromKubernetes(ctx1, ins.Name)
+			if err != nil {
+				err = fmt.Errorf("delete intance(%s) from kubernets failed, %s", ins.ID, err)
+				klog.Error(err)
+				ins.ErrorMsg = err.Error()
+			} else {
+				klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
+				ins.ErrorMsg = ""
+			}
+
 			// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
 			ins.Status = StatusDeleted
 			ins.ErrorMsg = ""
-			klog.V(1).Infof("delete intance(%s) success", ins.ID)
 		}
 
 		// 更新Instance信息
 		ngs.UpdateInstances(ins)
+
+		select {
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
 // removeDeletedInstances 移除之前已删除的instance
-func removeDeletedInstances(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
+func removeDeletedInstances(_ context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
-		if time.Now().After(ins.UpdateTime.Add(time.Hour * 24 * 7)) {
+		if time.Now().After(ins.UpdateTime.Add(time.Hour * 24 * 15)) {
 			ngs.RemoveInstances(ins)
 			klog.V(1).Infof("remove intance(%s) success", ins.ID)
 		}
@@ -1383,14 +1483,14 @@ func removeDeletedInstances(ctx context.Context, ngs *NodeGroups, instances []*I
 }
 
 // printFailedStatusInstances 报错错误状态的instance
-func printFailedStatusInstances(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
+func printFailedStatusInstances(_ context.Context, _ *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
 		klog.Errorf("intance(%s) status is: %s, ErrorMsg: %s", ins.ID, ins.Status, ins.ErrorMsg)
 	}
 }
 
 // 调用云厂商接口删除instance
-func callDeleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) error {
+func callDeleteInstance(ctx context.Context, _ *NodeGroups, ins *Instance) error {
 	cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
 	if err != nil {
 		return fmt.Errorf("call provider delete instance(%s) failed, %s", ins.ID, err)
@@ -1398,7 +1498,7 @@ func callDeleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) err
 
 	klog.V(1).Infof("call provider delete instance(%s)...", ins.ID)
 
-	ins, err = cp.DeleteInstance(ctx, ins, nil)
+	_, err = cp.DeleteInstance(ctx, ins, nil)
 	if err != nil {
 		return fmt.Errorf("call provider delete instance(%s) failed, %s", ins.ID, err)
 	}

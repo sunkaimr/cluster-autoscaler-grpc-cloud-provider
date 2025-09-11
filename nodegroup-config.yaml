@@ -3,6 +3,35 @@ cloudProviderOption:
     zhansan:
       secretId: "XXX"
       secretKey: "YYY"
+  instanceParameter:
+    tencentcloud_beijing5_10-2-20-x:
+      providerIdTemplate: "externalgrpc://tencentcloud/zhansan/ap-beijing/{{InstanceID}}"
+      parameter:
+        InstanceChargeType: "PREPAID"
+        InstanceChargePrepaid:
+          Period: 1
+          RenewFlag: "NOTIFY_AND_AUTO_RENEW"
+        Placement:
+          ProjectId: 123456
+          Zone: "ap-beijing-5"
+        InstanceType: "S5.2XLARGE16"
+        ImageId: "img-111111"
+        SystemDisk:
+          DiskType: "CLOUD_PREMIUM"
+          DiskSize: 200
+          DiskName: "K8S-NODE-SYSTEM-DISK"
+        VirtualPrivateCloud:
+          VpcId: "vpc-222222"
+          SubnetId: "subnet-333333"
+        InstanceCount: 1
+        InstanceName: "K8S-NODE"
+        SecurityGroupIds:
+          - "sg-444444"
+        TagSpecification:
+          -  ResourceType: "instance"
+             Tags:
+               - Key: "env"
+                 Value: "test"
 nodeGroups:
 - id: "master"
   minSize: 3
@@ -46,6 +75,11 @@ nodeGroups:
   minSize: 0
   maxSize: 10
   targetSize: 0
+  autoscalingOptions:
+    scaleDownUtilizationThreshold: 0.5
+    scaleDownGpuUtilizationThreshold: 0.5
+    scaleDownUnneededTime: "40m"
+    scaleDownUnreadyTime: "10m"
   nodeTemplate:
     labels:
       "node-role.kubernetes.io/autoscaler-test": ""

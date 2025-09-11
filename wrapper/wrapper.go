@@ -52,7 +52,7 @@ func pbNodeGroup(ng *nodegroup.NodeGroup) *protos.NodeGroup {
 }
 
 func debug(req fmt.Stringer) {
-	klog.V(9).Infof("got gRPC request: %T %s", req, req)
+	klog.V(6).Infof("got gRPC request: %T %s", req, req)
 }
 
 // NodeGroups is the wrapper for the cloud provider NodeGroups method.
@@ -61,7 +61,6 @@ func (_ *Wrapper) NodeGroups(_ context.Context, req *protos.NodeGroupsRequest) (
 	debug(req)
 
 	ngs := nodegroup.GetNodeGroups()
-
 	pbNgs := make([]*protos.NodeGroup, ngs.Length())
 
 	for i, ng := range ngs.List() {
@@ -137,12 +136,12 @@ func (_ *Wrapper) NodeGroupTargetSize(_ context.Context, req *protos.NodeGroupTa
 
 	id := req.GetId()
 
-	ng, err := nodegroup.GetNodeGroups().FindNodeGroupById(id)
+	size, err := nodegroup.GetNodeGroups().GetNodeGroupTargetSize(id)
 	if err != nil {
 		return &protos.NodeGroupTargetSizeResponse{}, err
 	}
 	return &protos.NodeGroupTargetSizeResponse{
-		TargetSize: int32(ng.TargetSize),
+		TargetSize: int32(size),
 	}, nil
 }
 
@@ -292,16 +291,6 @@ func (_ *Wrapper) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.NodeG
 }
 
 // NodeGroupGetOptions is the wrapper for the cloud provider NodeGroup GetOptions method.
-/*
-功能：获取节点组级配置
-
-覆盖配置示例：
-
-参数	作用
-ScaleDownUtilizationThreshold	缩容利用率阈值
-ScaleDownUnneededTime	节点空闲时间阈值
-ScaleDownGpuUtilizationThreshold	GPU 利用率缩容阈值
-*/
 func (_ *Wrapper) NodeGroupGetOptions(_ context.Context, req *protos.NodeGroupAutoscalingOptionsRequest) (*protos.NodeGroupAutoscalingOptionsResponse, error) {
 	debug(req)
 
@@ -310,15 +299,29 @@ func (_ *Wrapper) NodeGroupGetOptions(_ context.Context, req *protos.NodeGroupAu
 		return nil, fmt.Errorf("request fields were nil")
 	}
 
+	id := req.GetId()
+	ng, err := nodegroup.GetNodeGroups().FindNodeGroupById(id)
+	if err != nil {
+		return &protos.NodeGroupAutoscalingOptionsResponse{
+			NodeGroupAutoscalingOptions: pbDefaults,
+		}, err
+	}
+
+	if ng.AutoscalingOptions == nil {
+		return &protos.NodeGroupAutoscalingOptionsResponse{
+			NodeGroupAutoscalingOptions: pbDefaults,
+		}, nil
+	}
+
 	return &protos.NodeGroupAutoscalingOptionsResponse{
 		NodeGroupAutoscalingOptions: &protos.NodeGroupAutoscalingOptions{
-			ScaleDownUtilizationThreshold:    pbDefaults.GetScaleDownGpuUtilizationThreshold(),
-			ScaleDownGpuUtilizationThreshold: pbDefaults.GetScaleDownGpuUtilizationThreshold(),
+			ScaleDownUtilizationThreshold:    ng.AutoscalingOptions.ScaleDownUtilizationThreshold,
+			ScaleDownGpuUtilizationThreshold: ng.AutoscalingOptions.ScaleDownGpuUtilizationThreshold,
 			ScaleDownUnneededTime: &metav1.Duration{
-				Duration: pbDefaults.GetScaleDownUnneededTime().Duration,
+				Duration: ng.AutoscalingOptions.ScaleDownUnneededTime,
 			},
 			ScaleDownUnreadyTime: &metav1.Duration{
-				Duration: pbDefaults.GetScaleDownUnneededTime().Duration,
+				Duration: ng.AutoscalingOptions.ScaleDownUnreadyTime,
 			},
 		},
 	}, nil

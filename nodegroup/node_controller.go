@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"time"
 
 	"k8s.io/apimachinery/pkg/fields"
@@ -92,7 +93,9 @@ func newController(
 		UpdateFunc: func(old, new interface{}) {
 			newNode := new.(*corev1.Node)
 			oldNode := old.(*corev1.Node)
-			if newNode.ResourceVersion == oldNode.ResourceVersion {
+			if reflect.DeepEqual(newNode.Annotations, oldNode.Annotations) &&
+				reflect.DeepEqual(newNode.Labels, oldNode.Labels) &&
+				reflect.DeepEqual(newNode.Spec.Taints, oldNode.Spec.Taints) {
 				return
 			}
 			controller.enqueue(newNode)
@@ -115,7 +118,7 @@ func (c *Controller) enqueue(obj interface{}) {
 
 func (c *Controller) run(workers int, stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
-	defer c.workQueue.ShutDown()
+	//defer c.workQueue.ShutDown()
 
 	// Start the informer factories to begin populating the informer caches
 	klog.V(0).Info("Starting Node controller")
@@ -154,6 +157,7 @@ func (c *Controller) processNextWorkItem() bool {
 	obj, shutdown := c.workQueue.Get()
 
 	if shutdown {
+		klog.Info("work queue shutting down")
 		return false
 	}
 
@@ -242,9 +246,17 @@ func patchNodeNodeGroupTemplate(ctx context.Context, ngs *NodeGroups, ins *insta
 		node.Spec.Taints = append(node.Spec.Taints, t)
 	}
 
-	_, err = kubeClient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+	_, err = NewKubeClient().CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("patch node(%s) NodeGroupTemplate failed, %s", ins.Name, err)
+	}
+	return nil
+}
+
+func DeleteNodeFromKubernetes(ctx context.Context, nodeName string) error {
+	err := NewKubeClient().CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("delete node(%s) form kubernetes failed, %s", nodeName, err)
 	}
 	return nil
 }

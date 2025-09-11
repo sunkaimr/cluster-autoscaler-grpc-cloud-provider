@@ -126,36 +126,29 @@ func (c *Client) CreateInstance(ctx context.Context, instance *Instance, para in
 	paraRaw, err := json.Marshal(para)
 	if err != nil {
 		err = fmt.Errorf("marshal instance(%s).instanceParameter failde, %s", instance.ID, err)
-		instance.Status = StatusFailed
-		instance.ErrorMsg = err.Error()
 		return instance, err
 	}
 
 	err = req.FromJsonString(string(paraRaw))
 	if err != nil {
 		err = fmt.Errorf("check instance(%s).instanceParameter failde, %s", instance.ID, err)
-		instance.Status = StatusFailed
-		instance.ErrorMsg = err.Error()
 		return instance, err
 	}
 
 	resp, err := c.client.RunInstancesWithContext(ctx, req)
 	if err != nil {
 		err = fmt.Errorf("create instance(%s) failed, %s", instance.ID, err)
-		instance.Status = StatusFailed
-		instance.ErrorMsg = err.Error()
 		return instance, err
 	}
 
 	if len(resp.Response.InstanceIdSet) > 0 {
-		instance.Status = StatusCreating
 		instance.ProviderID = *resp.Response.InstanceIdSet[0]
 	}
 
 	return instance, nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error) {
+func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, _ interface{}) (*Instance, error) {
 	// 先查询如果已经处于待回收状态则返回成功
 	req := cvm.NewDescribeInstancesRequest()
 	var limit int64 = 100

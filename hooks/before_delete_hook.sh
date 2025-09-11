@@ -17,7 +17,6 @@ log_error() {
 }
 
 
-
 # 主函数
 main() {
     log_info "starting exec before_delete_hook script"

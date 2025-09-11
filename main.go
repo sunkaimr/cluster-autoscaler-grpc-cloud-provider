@@ -9,11 +9,11 @@ import (
 	"sync"
 	"syscall"
 
-	nodegroup "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
-	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
-
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/wrapper"
 	"google.golang.org/grpc"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	cloudBuilder "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/builder"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/externalgrpc/protos"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
@@ -24,12 +24,14 @@ import (
 var (
 	// flags needed by the external grpc provider service
 	address           = flag.String("address", ":8086", "The address to expose the grpc service.")
-	ns                = flag.String("namespace", "kube-system", "which namespace the grpc-provider running in kubernetes")
-	cm                = flag.String("nodegroup-status-cm", "nodegroup-status", "the config-map name of save nodegroup status")
 	cloudProviderFlag = flag.String("cloud-provider", cloudprovider.ExternalGrpcProviderName, "cloud provider type, only support 'externalgrpc'")
 	cloudConfig       = flag.String("cloud-config", "cloud-config.cfg", "The path to the cloud provider configuration file.")
+	ns                = flag.String("namespace", "kube-system", "which namespace the grpc-provider running in kubernetes")
+	cm                = flag.String("nodegroup-status-cm", "nodegroup-status", "the config-map name of save nodegroup status")
 	nodeGroupConfig   = flag.String("nodegroup-config", "nodegroup-config.yaml", "The path to the nodegroup configuration file.")
 	hooksPath         = flag.String("hooks-path", "./hooks", "The path to the hooks, should contains 2 hooks: after_created_hook.sh, before_delete_hook.sh")
+	createParallelism = flag.Int("create-parallelism", 1, "Maximum number of concurrent create instance allowed. Limits how many instances can be created simultaneously.")
+	deleteParallelism = flag.Int("delete-parallelism", 1, "Maximum number of concurrent delete instance allowed. Limits how many instances can be deleted at the same time.")
 )
 
 var grpcServer *grpc.Server
@@ -49,7 +51,6 @@ func main() {
 	ctx = context.WithValue(ctx, "wg", &sync.WaitGroup{})
 	SetupSignalHandler(cancel)
 
-	// 等待node controller运行成功
 	ngs := nodegroup.GetNodeGroups()
 	err := ngs.Run(
 		ctx,
@@ -57,6 +58,8 @@ func main() {
 		ngs.WithOpsStatusConfigMap(*cm),
 		ngs.WithOpsConfigFile(*nodeGroupConfig),
 		ngs.WithOpsHooksPath(*hooksPath),
+		ngs.WithCreateParallelism(*createParallelism),
+		ngs.WithDeleteParallelism(*deleteParallelism),
 		ngs.CheckKubeNodeSshUser(),
 	)
 	if err != nil {
@@ -75,8 +78,9 @@ func main() {
 		klog.Fatalf("failed to serve: %v", err)
 	}
 
-	ctx.Value("wg").(*sync.WaitGroup).Wait()
-	nodegroup.WriteNodeGroupStatusToConfigMap(ctx)
+	common.ContextWaitGroupWait(ctx)
+	nodegroup.WriteNodeGroupStatusToConfigMap(context.TODO())
+	klog.Warning("main exited")
 }
 
 func SetupSignalHandler(exit context.CancelFunc) {
