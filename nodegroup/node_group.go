@@ -188,8 +188,9 @@ func (ngs *NodeGroups) Run(ctx context.Context, ops ...func() error) error {
 	}
 
 	ngs.loadNodeGroups()
-	// 等待node controller运行成功
+	// 等待node controller运行成功, 并将k8s中的Node信息同步至NodeGroup
 	runNodeController(ctx)
+	ngs.RefreshTargetSize()
 
 	go ngs.runInstancesController(ctx)
 	go wait.UntilWithContext(ctx, WriteNodeGroupStatusToConfigMap, time.Second*5)
@@ -462,22 +463,22 @@ func (ngs *NodeGroups) GetNodeGroupTargetSize(id string /*nodegroup id*/) (int, 
 
 }
 
-//func (ngs *NodeGroups) RefreshTargetSize() {
-//	ngs.Lock()
-//	defer ngs.Unlock()
-//
-//	// 刷新TargetSize
-//	for _, ng := range ngs.cache {
-//		size := 0
-//		for _, ins := range ng.Instances {
-//			if ins.Status == StatusDeleted {
-//				continue
-//			}
-//			size++
-//		}
-//		ng.TargetSize = size
-//	}
-//}
+func (ngs *NodeGroups) RefreshTargetSize() {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	// 刷新TargetSize
+	for _, ng := range ngs.cache {
+		size := 0
+		for _, ins := range ng.Instances {
+			if ins.Status == StatusDeleted {
+				continue
+			}
+			size++
+		}
+		ng.TargetSize = size
+	}
+}
 
 // UpdateNodeInNodeGroup 需要考虑：
 // 1，首次启动时node相对应instance不存在 => 创建Instance
@@ -738,7 +739,7 @@ func buildGenericLabels(ngt *NodeTemplate, nodeName string) map[string]string {
 	return result
 }
 
-func (ngs *NodeGroups) toYaml() (string, error) {
+func (ngs *NodeGroups) Yaml() (string, error) {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -766,7 +767,7 @@ func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
 	namespace := GetNodeGroups().ops.nameSpace
 	configmap := GetNodeGroups().ops.statusConfigMap
 
-	data, err := GetNodeGroups().toYaml()
+	data, err := GetNodeGroups().Yaml()
 	if err != nil {
 		err = fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
 		klog.Error(err)
@@ -831,13 +832,13 @@ func SyncNodeGroupStatusFromConfigMap(configMap *corev1.ConfigMap) {
 	configmap := configMap.Name
 
 	// NodeGroupStatus已经发生变动，上锁禁止其他地方再修改
-	equel, err := compareConfigMapMd5(configMap)
+	equal, err := compareConfigMapMd5(configMap)
 	if err != nil {
 		klog.Errorf("compare configmap(%s/%s) md5 failed, %s", namespace, configmap, err)
 		return
 	}
 
-	if equel {
+	if equal {
 		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
 		return
 	} else {
@@ -877,7 +878,7 @@ func compareConfigMapMd5(configMap *corev1.ConfigMap) (bool, error) {
 	namespace := configMap.Namespace
 	configmap := configMap.Name
 
-	ngs1, err := GetNodeGroups().toYaml()
+	ngs1, err := GetNodeGroups().Yaml()
 	if err != nil {
 		return false, fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
 	}
@@ -925,7 +926,7 @@ func compareConfigMapMd5(configMap *corev1.ConfigMap) (bool, error) {
 // 1, 若cm不存在则以配置文件为主
 // 2, cm存在但内容为空以配置文件为主
 // 3, 解析失败报错，程序无法启动
-func (ngs *NodeGroups) readStatusFromConfigMap() (*NodeGroupsConfig, error) {
+func (ngs *NodeGroups) readNodeGroupFromConfigMap() (*NodeGroupsConfig, error) {
 	configMap, err := NewKubeClient().CoreV1().ConfigMaps(ngs.ops.nameSpace).Get(context.TODO(), ngs.ops.statusConfigMap, metav1.GetOptions{})
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
@@ -981,7 +982,7 @@ func (ngs *NodeGroups) readNodeGroupsFromFile() (*NodeGroupsConfig, error) {
 }
 
 func (ngs *NodeGroups) loadNodeGroups() {
-	ngc, err := ngs.readStatusFromConfigMap()
+	ngc, err := ngs.readNodeGroupFromConfigMap()
 	if err != nil {
 		klog.Fatal(err)
 		return
