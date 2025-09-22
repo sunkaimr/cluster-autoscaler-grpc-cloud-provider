@@ -229,7 +229,7 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 			continue
 		}
 
-		if ins.Status == instance.StatusDeleted {
+		if ins.Stage == instance.StageDeleted {
 			continue
 		}
 
@@ -245,27 +245,21 @@ func (_ *Wrapper) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRe
 
 func stateMapping(ngInstance *instance.Instance) *protos.InstanceStatus {
 	pbStatus := new(protos.InstanceStatus)
-	switch ngInstance.Status {
-	case instance.StatusPending:
+	switch ngInstance.Stage {
+	case instance.StagePending:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
-	case instance.StatusCreating:
+	case instance.StageCreating:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
-	case instance.StatusCreated:
+	case instance.StageCreated:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
-	case instance.StatusRunning:
+	case instance.StageRunning:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceRunning
-	case instance.StatusPendingDeletion:
+	case instance.StagePendingDeletion:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceDeleting
-	case instance.StatusDeleting:
+	case instance.StageDeleting:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceDeleting
-	case instance.StatusDeleted:
+	case instance.StageDeleted:
 		pbStatus.InstanceState = protos.InstanceStatus_unspecified
-	case instance.StatusFailed, instance.StatusUnknown:
-		pbStatus.InstanceState = protos.InstanceStatus_unspecified
-		pbStatus.ErrorInfo = &protos.InstanceErrorInfo{
-			ErrorCode:    ngInstance.ErrorMsg,
-			ErrorMessage: ngInstance.ErrorMsg,
-		}
 	default:
 		pbStatus.InstanceState = protos.InstanceStatus_unspecified
 		pbStatus.ErrorInfo = &protos.InstanceErrorInfo{

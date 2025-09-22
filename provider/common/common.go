@@ -8,6 +8,16 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type InstanceStatus string
+
+const (
+	InstanceStatusCreating InstanceStatus = "Creating"
+	InstanceStatusRunning  InstanceStatus = "Running"
+	InstanceStatusDeleted  InstanceStatus = "Deleted"
+	InstanceStatusFailed   InstanceStatus = "Failed"
+	InstanceStatusUnknown  InstanceStatus = "Unknown"
+)
+
 // ExtractProviderID providerID格式如下：externalgrpc://<provider>/<account>/<region>/<instanceID>
 func ExtractProviderID(providerID string) (provider, account, region, instanceID string, err error) {
 	if !strings.HasPrefix(providerID, "externalgrpc://") {

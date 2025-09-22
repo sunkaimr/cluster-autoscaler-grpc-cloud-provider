@@ -80,6 +80,13 @@ nodeGroups:
     scaleDownGpuUtilizationThreshold: 0.5
     scaleDownUnneededTime: "40m"
     scaleDownUnreadyTime: "10m"
+  instances:
+    - id: 6ddb4200
+      name: 1.2.3.4
+      ip: 1.2.3.4
+      providerID: externalgrpc://tencentcloud/zhansan/ap-beijing/ins-aaaaaaa
+      status: Deleted
+      updateTime: 2025-09-06T00:50:31.994536143+08:00
   nodeTemplate:
     labels:
       "node-role.kubernetes.io/autoscaler-test": ""

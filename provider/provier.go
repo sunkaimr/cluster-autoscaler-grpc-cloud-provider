@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/providers/tencentcloud"
 )
@@ -30,13 +29,11 @@ type InstanceParameter struct {
 }
 
 type Cloudprovider interface {
-	InstanceStatus(ctx context.Context, instance *Instance) (*Instance, error)
-
-	InstancesStatus(ctx context.Context, instances ...*Instance) ([]*Instance, error)
-
-	CreateInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error)
-
-	DeleteInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error)
+	CreateInstance(ctx context.Context, para interface{}) (string, error)
+	InstanceStatus(ctx context.Context, insId string) (InstanceStatus, error)
+	InstancesStatus(ctx context.Context, insIds ...string) (map[string]InstanceStatus, error)
+	InstanceIp(ctx context.Context, insId string) (string, error)
+	DeleteInstance(ctx context.Context, insId string, para interface{}) error
 }
 
 func NewCloudprovider(providerID string, opts CloudProviderOption) (Cloudprovider, error) {

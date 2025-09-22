@@ -2,15 +2,12 @@ package tencentcloud
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
-
-	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
-	"k8s.io/apimachinery/pkg/util/json"
 )
 
 const (
@@ -21,6 +18,7 @@ type Client struct {
 	client *cvm.Client
 }
 
+// BuildTencentCloudProvider 返回一个Client实例
 func BuildTencentCloudProvider(paras map[string]string) (*Client, error) {
 	if v, ok := paras["secretId"]; !ok || v == "" {
 		return nil, fmt.Errorf("init cloudprovider(%s) client failed, missing para 'secretId'", ProviderName)
@@ -43,146 +41,142 @@ func BuildTencentCloudProvider(paras map[string]string) (*Client, error) {
 	return &Client{client: client}, nil
 }
 
-func (c *Client) InstanceStatus(ctx context.Context, ins *Instance) (*Instance, error) {
-	var limit int64 = int64(100)
-
-	req := cvm.NewDescribeInstancesRequest()
-	req.Limit = &limit
-	_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
-	req.InstanceIds = append(req.InstanceIds, &instanceID)
-
-	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
-	if err != nil {
-		ins.ErrorMsg = err.Error()
-		return ins, fmt.Errorf("DescribeInstances failed, %s", err)
-	}
-
-	ins.ErrorMsg = "unknown status"
-	for _, respIns := range resp.Response.InstanceSet {
-		if instanceID == *respIns.InstanceId {
-			ins.Status = stateMapping(*respIns.InstanceState)
-			ins.ErrorMsg = ""
-
-			// 如果instance状态正常则更新IP地址
-			if ins.IP == "" && len(respIns.PrivateIpAddresses) > 0 {
-				ins.IP = *respIns.PrivateIpAddresses[0]
-			}
-			break
-		}
-	}
-	return ins, nil
-}
-
-func (c *Client) InstancesStatus(ctx context.Context, instances ...*Instance) ([]*Instance, error) {
-	var limit int64 = int64(len(instances))
-
-	req := cvm.NewDescribeInstancesRequest()
-	req.Limit = &limit
-	for _, ins := range instances {
-		_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
-		req.InstanceIds = append(req.InstanceIds, &instanceID)
-	}
-
-	for _, ins := range instances {
-		ins.Status = StatusUnknown
-		ins.ErrorMsg = "unknown status"
-	}
-
-	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
-	if err != nil {
-		return instances, fmt.Errorf("DescribeInstances failed, %s", err)
-	}
-
-	for _, respIns := range resp.Response.InstanceSet {
-		for _, ins := range instances {
-			_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
-			if instanceID == *respIns.InstanceId {
-				ins.Status = stateMapping(*respIns.InstanceState)
-				ins.ErrorMsg = ""
-				break
-			}
-		}
-	}
-
-	// 有些instance没有查找到
-	notFoudIns := make([]string, 0, len(instances))
-	for _, ins := range instances {
-		if ins.Status == StatusUnknown {
-			_, _, _, instanceID, _ := ExtractProviderID(ins.ProviderID)
-			notFoudIns = append(notFoudIns, instanceID)
-		}
-	}
-
-	if len(notFoudIns) != 0 {
-		return instances, fmt.Errorf("instance status unknown: %s", strings.Join(notFoudIns, ","))
-	}
-
-	return instances, nil
-}
-
-func (c *Client) CreateInstance(ctx context.Context, instance *Instance, para interface{}) (*Instance, error) {
+// CreateInstance 创建一个instance
+// 返回instanceID
+func (c *Client) CreateInstance(ctx context.Context, para interface{}) (string, error) {
 	req := cvm.NewRunInstancesRequest()
 
 	paraRaw, err := json.Marshal(para)
 	if err != nil {
-		err = fmt.Errorf("marshal instance(%s).instanceParameter failde, %s", instance.ID, err)
-		return instance, err
+		err = fmt.Errorf("marshal instance.instanceParameter failde, %s", err)
+		return "", err
 	}
 
 	err = req.FromJsonString(string(paraRaw))
 	if err != nil {
-		err = fmt.Errorf("check instance(%s).instanceParameter failde, %s", instance.ID, err)
-		return instance, err
+		err = fmt.Errorf("check instance.instanceParameter failde, %s", err)
+		return "", err
 	}
+
+	// 确保只创建一个
+	var count int64 = 1
+	req.InstanceCount = &count
 
 	resp, err := c.client.RunInstancesWithContext(ctx, req)
 	if err != nil {
-		err = fmt.Errorf("create instance(%s) failed, %s", instance.ID, err)
-		return instance, err
+		err = fmt.Errorf("create instance failed, %s", err)
+		return "", err
 	}
 
-	if len(resp.Response.InstanceIdSet) > 0 {
-		instance.ProviderID = *resp.Response.InstanceIdSet[0]
+	switch len(resp.Response.InstanceIdSet) {
+	case 0:
+		return "", fmt.Errorf("not found instance id")
+	case 1:
+		return *resp.Response.InstanceIdSet[0], nil
+	default:
+		return "", fmt.Errorf("got too many instance: %v", resp.Response.InstanceIdSet)
 	}
-
-	return instance, nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, _ interface{}) (*Instance, error) {
+// InstanceStatus 查询某个实例的运行状态
+func (c *Client) InstanceStatus(ctx context.Context, insId string) (InstanceStatus, error) {
+	var limit = int64(100)
+
+	req := cvm.NewDescribeInstancesRequest()
+	req.Limit = &limit
+	req.InstanceIds = append(req.InstanceIds, &insId)
+
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("DescribeInstances failed, %s", err)
+	}
+
+	for _, respIns := range resp.Response.InstanceSet {
+		if insId == *respIns.InstanceId {
+			return statusMapping(*respIns.InstanceState), nil
+		}
+	}
+	return InstanceStatusUnknown, fmt.Errorf("not found instance id")
+}
+
+// InstanceIp 查询某个实例的IP地址
+func (c *Client) InstanceIp(ctx context.Context, insId string) (string, error) {
+	var limit = int64(100)
+
+	req := cvm.NewDescribeInstancesRequest()
+	req.Limit = &limit
+	req.InstanceIds = append(req.InstanceIds, &insId)
+
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("DescribeInstances failed, %s", err)
+	}
+
+	for _, respIns := range resp.Response.InstanceSet {
+		if insId == *respIns.InstanceId {
+			if len(respIns.PrivateIpAddresses) > 0 {
+				return *respIns.PrivateIpAddresses[0], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("not found instance id")
+}
+
+// InstancesStatus 查询多个instance的状态
+func (c *Client) InstancesStatus(ctx context.Context, insIds ...string) (map[string]InstanceStatus, error) {
+	var limit = int64(len(insIds))
+
+	req := cvm.NewDescribeInstancesRequest()
+	req.Limit = &limit
+	for i, _ := range insIds {
+		req.InstanceIds = append(req.InstanceIds, &insIds[i])
+	}
+
+	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeInstances failed, %s", err)
+	}
+
+	res := make(map[string]InstanceStatus, len(resp.Response.InstanceSet))
+	for _, respIns := range resp.Response.InstanceSet {
+		res[*respIns.InstanceId] = statusMapping(*respIns.InstanceState)
+	}
+	return res, nil
+}
+
+func (c *Client) DeleteInstance(ctx context.Context, insId string, _ interface{}) error {
 	// 先查询如果已经处于待回收状态则返回成功
 	req := cvm.NewDescribeInstancesRequest()
 	var limit int64 = 100
 	req.Limit = &limit
-	provider, account, region, instanceID, _ := ExtractProviderID(instance.ProviderID)
-	req.InstanceIds = append(req.InstanceIds, &instanceID)
+	req.InstanceIds = append(req.InstanceIds, &insId)
 
 	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
 	if err != nil {
-		return instance, fmt.Errorf("DescribeInstances failed, %s", err)
+		return fmt.Errorf("DescribeInstances failed, %s", err)
 	}
 
 	// 找不到对应的实例
 	if len(resp.Response.InstanceSet) == 0 {
-		return instance, fmt.Errorf("instance %s/%s/%s/%s not found", provider, account, region, instanceID)
+		return fmt.Errorf("instance %s not found", insId)
 	}
 
 	for _, respIns := range resp.Response.InstanceSet {
-		if stateMapping(*respIns.InstanceState) == StatusDeleted {
-			return instance, nil
+		if statusMapping(*respIns.InstanceState) == InstanceStatusDeleted {
+			return nil
 		}
 	}
 
 	req1 := cvm.NewTerminateInstancesRequest()
-	_, _, _, instanceID, _ = ExtractProviderID(instance.ProviderID)
 	releasePrepaidDataDisks := true // 释放挂载的数据盘
-	req1.InstanceIds = []*string{&instanceID}
+	req1.InstanceIds = []*string{&insId}
 	req1.ReleasePrepaidDataDisks = &releasePrepaidDataDisks
 
 	_, err = c.client.TerminateInstances(req1)
 	if err != nil {
-		return instance, fmt.Errorf("fail to TerminateInstances, %s", err)
+		return fmt.Errorf("fail to TerminateInstances, %s", err)
 	}
-	return instance, nil
+	return nil
 }
 
 // InstanceStatus: instance状态：https://cloud.tencent.com/document/api/213/15753#InstanceStatus
@@ -206,12 +200,12 @@ func (c *Client) DeleteInstance(ctx context.Context, instance *Instance, _ inter
 // NORMAL：表示正常状态的实例
 // EXPIRED：表示过期的实例
 // PROTECTIVELY_ISOLATED：表示被安全隔离的实例
-func stateMapping(status string) Status {
+func statusMapping(status string) InstanceStatus {
 	switch status {
 	case "PENDING":
-		return StatusCreating
+		return InstanceStatusCreating
 	case "LAUNCH_FAILED":
-		return StatusFailed
+		return InstanceStatusFailed
 	case "RUNNING",
 		"STOPPED",
 		"STARTING",
@@ -223,10 +217,10 @@ func stateMapping(status string) Status {
 		"ENTER_SERVICE_LIVE_MIGRATE",
 		"SERVICE_LIVE_MIGRATE",
 		"EXIT_SERVICE_LIVE_MIGRATE":
-		return StatusRunning
+		return InstanceStatusRunning
 	case "TERMINATING", "SHUTDOWN":
-		return StatusDeleted
+		return InstanceStatusDeleted
 	default:
-		return StatusUnknown
+		return InstanceStatusUnknown
 	}
 }
