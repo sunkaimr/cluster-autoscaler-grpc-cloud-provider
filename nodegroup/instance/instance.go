@@ -12,7 +12,8 @@ const (
 	StagePending         Stage = "Pending"         // 等待创建instance
 	StageCreating        Stage = "Creating"        // 已经调用了云厂商接口创建了instance, 等待运行起来
 	StageCreated         Stage = "Created"         // instance状态已经运行起来，等待执行AfterCratedHook
-	StageRunning         Stage = "Running"         // instance状态已经运行起来,AfterCratedHook执行成功
+	StageJoined          Stage = "Joined"          // AfterCratedHook执行成功,等待加入集群后执行打标签和污点
+	StageRunning         Stage = "Running"         // instance成功加入集群
 	StagePendingDeletion Stage = "PendingDeletion" // 删除instance前等待执行BeforeDeleteHook
 	StageDeleting        Stage = "Deleting"        // BeforeDeleteHook执行成功等待调用云厂商接口删除instance
 	StageDeleted         Stage = "Deleted"         // 云厂商instance成功，instance记录保留一段时间后删除记录
@@ -21,9 +22,10 @@ const (
 type Result string
 
 const (
-	ResultSuccess = "Success"
-	ResultFailed  = "Failed"
-	ResultUnknown = "Unknown"
+	ResultInProcess = "InProcess"
+	ResultSuccess   = "Success"
+	ResultFailed    = "Failed"
+	ResultUnknown   = "Unknown"
 )
 
 type Instance struct {

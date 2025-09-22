@@ -43,7 +43,7 @@ func NewScriptExecutor(host, port, user, passwd, keyPath string) (*ScriptExecuto
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
+		Timeout:         30 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", host+":"+port, sshConfig)

@@ -250,7 +250,7 @@ func stateMapping(ngInstance *instance.Instance) *protos.InstanceStatus {
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
 	case instance.StageCreating:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
-	case instance.StageCreated:
+	case instance.StageCreated, instance.StageJoined:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceCreating
 	case instance.StageRunning:
 		pbStatus.InstanceState = protos.InstanceStatus_instanceRunning

@@ -6,7 +6,6 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 	"math/rand"
 	"os"
 	"path"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 
 	"github.com/spf13/viper"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
@@ -74,6 +75,7 @@ var (
 			StageCreating:        queue.New(),
 			StageCreated:         queue.New(),
 			StageRunning:         queue.New(),
+			StageJoined:          queue.New(),
 			StagePendingDeletion: queue.New(),
 			StageDeleting:        queue.New(),
 			StageDeleted:         queue.New(),
@@ -484,6 +486,8 @@ func (ngs *NodeGroups) RefreshTargetSize() {
 // 1，首次启动时node相对应instance不存在 => 创建Instance
 // 2，node标签或污点被修改导致instance所属NodeGroup发生改变
 func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
+	defer ngs.RefreshTargetSize()
+
 	// 更新NodeGroup.Instances的归属信息
 	ng, err := ngs.FindNodeGroupByNodeName(node.Name)
 	if err != nil {
@@ -524,6 +528,13 @@ func (ngs *NodeGroups) UpdateNodeInNodeGroup(node *corev1.Node) error {
 	}
 	// node所属nodegroup发生改变了, 删除ng中的instance，将node添加到matchedNg的instance中
 	if ng.Id != matchedNg.Id {
+		// 只有Running状态的Node才能调整NodeGroup，其他状态的Instance可能还没来得及打标签不能调整他所属的NodeGroup
+		if ins := ngs.cache.find(ng.Id).Instances.FindByName(node.Name); ins != nil {
+			if ins.Stage != StageRunning {
+				return nil
+			}
+		}
+
 		ngs.Lock()
 		if ngs.cache.find(ng.Id) == nil {
 			klog.Warningf("nodegroup(%s) not found", ng.Id)
@@ -612,10 +623,10 @@ func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) er
 			break
 		}
 
-		//if ins.Stage == StageDeleted {
-		//	klog.Warningf("nodegroup(%s) node(%s) status is Deleted",ID, name)
-		//	continue
-		//}
+		if ins.Stage == StageDeleted {
+			klog.Warningf("instance(%s) status is Deleted", ins.ID)
+			continue
+		}
 
 		ins.Stage = StagePendingDeletion
 		ins.Result = ""
@@ -811,7 +822,7 @@ func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
 
 	// 根据md5判断内容是否一致, 若一致则无需更新
 	if md5.Sum([]byte(data)) == md5.Sum([]byte(configMap.Data["NodeGroupsConfig"])) {
-		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
+		klog.V(6).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
 		return
 	} else {
 		klog.V(3).Infof("configmap(%s/%s) md5 changed", namespace, configmap)
@@ -1138,12 +1149,14 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 	// instance状态已经运行起来，等待执行AfterCratedHook
 	// - 执行AfterCreated Hook, 包含修改内核参数，修改hostname等。Hook需要支持幂等
 	// - 执行kubeadm join流程
-	// - 包含添加label，污点，注册CMDB等
-	// - 当hook执行完成需要将instance状态更改为Running
 	go wait.Until(func() { routeInstanceByStatus(ngs, StageCreated /*key*/, StageCreated) }, time.Second*5, ctx.Done())
 
+	// - 包含添加label，污点
+	// - 当hook执行完成需要将instance状态更改为Running
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageJoined /*key*/, StageJoined) }, time.Second*5, ctx.Done())
+
 	// 更新Instance的状态
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageRunning /*key*/, StageRunning, "") }, time.Minute*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageRunning /*key*/, StageRunning, "") }, time.Second*5, ctx.Done())
 
 	// 删除instance前等待执行BeforeDeleteHook
 	go wait.Until(func() { routeInstanceByStatus(ngs, StagePendingDeletion /*key*/, StagePendingDeletion) }, time.Second*5, ctx.Done())
@@ -1152,7 +1165,7 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleting /*key*/, StageDeleting) }, time.Second*5, ctx.Done())
 
 	// 云厂商instance成功，instance记录保留一段时间后删除记录
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleted /*key*/, StageDeleted) }, time.Minute, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleted /*key*/, StageDeleted) }, time.Second*5, ctx.Done())
 
 	// 定时报告状态是Failed的instance
 	//go wait.Until(func() { routeInstanceByStatus(ngs, StageFailed /*key*/, StageFailed) }, time.Minute, ctx.Done())
@@ -1160,6 +1173,7 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 	go handleRouteInstances(ctx, ngs, StagePending, 1, ngs.ops.createParallelism, createInstance)
 	go handleRouteInstances(ctx, ngs, StageCreating, 1, 10, waitInstanceCreated)
 	go handleRouteInstances(ctx, ngs, StageCreated, 1, 3, execAfterCreatedHook)
+	go handleRouteInstances(ctx, ngs, StageJoined, 1, 10, waitJoined)
 	go handleRouteInstances(ctx, ngs, StageRunning, 1, 20, syncInstanceStatus)
 	go handleRouteInstances(ctx, ngs, StagePendingDeletion, 1, ngs.ops.deleteParallelism, execBeforeDeleteHook)
 	go handleRouteInstances(ctx, ngs, StageDeleting, 1, 3, deleteInstance)
@@ -1277,7 +1291,9 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups, instances []*Insta
 
 	// 调用云厂商接口获取instance状态
 	for k, inss := range classifiedIns {
-		if len(inss) == 0 {
+		insIds := extractInstancesIDForSyncInstanceStatus(inss)
+
+		if len(insIds) == 0 {
 			continue
 		}
 
@@ -1287,7 +1303,6 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups, instances []*Insta
 			continue
 		}
 
-		insIds := extractInstancesID(inss)
 		res, err := cp.InstancesStatus(ctx, insIds...)
 		if err != nil {
 			klog.Errorf("sync instances status failed, %s", err)
@@ -1325,11 +1340,13 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups, instances []*Insta
 	}
 }
 
-func extractInstancesID(inss []*Instance) []string {
+func extractInstancesIDForSyncInstanceStatus(inss []*Instance) []string {
 	insIds := make([]string, 0, len(inss))
 	for _, ins := range inss {
-		_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
-		insIds = append(insIds, id)
+		if ins.UpdateTime.Add(time.Minute * 5).Before(time.Now()) {
+			_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
+			insIds = append(insIds, id)
+		}
 	}
 	return insIds
 }
@@ -1462,9 +1479,12 @@ func generateInstanceName(ip string) string {
 // - 调整内核参数
 func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
 	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
+		if ins.Result == ResultSuccess || ins.Result == ResultFailed || ins.Result == ResultInProcess {
 			continue
 		}
+
+		ins.Result = ResultInProcess
+		ngs.UpdateInstancesStatus(ins)
 
 		start := time.Now()
 		klog.V(1).Infof("exec %s for intance(%s)...", AfterCreatedScript, ins.ID)
@@ -1475,19 +1495,47 @@ func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, instances []*Ins
 			ins.ErrorMsg = err.Error()
 			klog.Error(err)
 		} else {
-			// 设置标签和污点
-			err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
-			if err != nil {
-				err = fmt.Errorf("patch intance(%s) NodeNodeGroupTemplate failed, cost:%v, %s", ins.ID, time.Since(start), err)
-				ins.Result = ResultFailed
-				ins.ErrorMsg = err.Error()
-				klog.Error(err)
-			} else {
-				ins.Stage = StageRunning
-				ins.Result = ""
-				ins.ErrorMsg = ""
-				klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
-			}
+			ins.Stage = StageJoined
+			ins.Result = ""
+			ins.ErrorMsg = ""
+			klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
+		}
+
+		// 更新Instance信息
+		ngs.UpdateInstancesStatus(ins)
+	}
+}
+
+// waitJoined等待在k8s集群就绪
+func waitJoined(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
+	for _, ins := range instances {
+		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
+			continue
+		}
+
+		_, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
+		if err != nil {
+			ins.Result = ResultInProcess
+			ins.ErrorMsg = err.Error()
+			ngs.UpdateInstancesStatus(ins)
+			return
+		}
+
+		start := time.Now()
+		klog.V(1).Infof("patch lable for intance(%s)...", ins.ID)
+
+		// 设置标签和污点, 需要等待
+		err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
+		if err != nil {
+			err = fmt.Errorf("patch lable for intance(%s) failed, cost:%v, %s", ins.ID, time.Since(start), err)
+			ins.Result = ResultFailed
+			ins.ErrorMsg = err.Error()
+			klog.Error(err)
+		} else {
+			ins.Stage = StageRunning
+			ins.Result = ""
+			ins.ErrorMsg = ""
+			klog.V(1).Infof("patch lable for intance(%s) success, cost:%v", ins.ID, time.Since(start))
 		}
 
 		// 更新Instance信息
@@ -1532,7 +1580,7 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance)
 
 		ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
 		err := callDeleteInstance(ctx1, ngs, ins)
-		cancel()
+		defer cancel()
 		if err != nil {
 			err = fmt.Errorf("delete intance(%s) failed, %s", ins.ID, err)
 			ins.Result = ResultFailed
@@ -1608,6 +1656,7 @@ func execHookScript(ctx context.Context, ngs *NodeGroups, ins *Instance, script 
 	envPath := fmt.Sprintf("%s/hooks/env", remoteBaseDir)
 	logPath := strings.TrimSuffix(remote, ".sh") + ".log"
 
+	// TODO 机器刚启动等待ssh就绪
 	executor, err := script_executor.NewScriptExecutor(generateSshInfo(ins))
 	if err != nil {
 		err = fmt.Errorf("NewScriptExecutor for %s failed, %s", script, err)

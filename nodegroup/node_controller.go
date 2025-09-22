@@ -206,6 +206,7 @@ func (c *Controller) syncHandler(key string) error {
 			// node被删除了
 			klog.V(1).Infof("%s was deleted", key)
 			GetNodeGroups().DeleteNode(nodeName)
+			GetNodeGroups().RefreshTargetSize()
 			return nil
 		}
 
