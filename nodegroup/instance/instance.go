@@ -22,10 +22,11 @@ const (
 type Result string
 
 const (
-	ResultInProcess = "InProcess"
-	ResultSuccess   = "Success"
-	ResultFailed    = "Failed"
-	ResultUnknown   = "Unknown"
+	ResultInit      = "Init"      // 初始状态
+	ResultInProcess = "InProcess" // 正在处理中
+	ResultSuccess   = "Success"   // 执行成功
+	ResultFailed    = "Failed"    // 执行失败
+	ResultUnknown   = "Unknown"   // 未知状态，只有Running时会用到
 )
 
 type Instance struct {

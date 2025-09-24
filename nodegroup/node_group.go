@@ -14,11 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
-
+	"github.com/sethvargo/go-retry"
 	"github.com/spf13/viper"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/script_executor"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/queue"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/utils"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider"
@@ -444,7 +444,7 @@ func (ngs *NodeGroups) NodeGroupIncreaseSize(id string /*nodegroup id*/, num int
 			IP:         "", // instance创建好才知道
 			ProviderID: "", // instance创建好才知道
 			Stage:      StagePending,
-			Result:     "",
+			Result:     ResultInit,
 			ErrorMsg:   "",
 			UpdateTime: time.Now(),
 		})
@@ -581,7 +581,7 @@ func (ngs *NodeGroups) DeleteNode(nodeName string) {
 			}
 
 			ins.Stage = StagePendingDeletion
-			ins.Result = ""
+			ins.Result = ResultInit
 			ins.ErrorMsg = ""
 		}
 	}
@@ -628,10 +628,10 @@ func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) er
 			continue
 		}
 
+		klog.V(0).Infof("nodegroup(%s) node(%s) is %s and marked %s", ng.Id, ins.Name, ins.Stage, StagePendingDeletion)
 		ins.Stage = StagePendingDeletion
-		ins.Result = ""
+		ins.Result = ResultInit
 		ins.ErrorMsg = ""
-		klog.V(0).Infof("nodegroup(%s) node(%s) is %s and marked PendingDeletion", ng.Id, ins.Name, ins.Stage)
 		deleted++
 	}
 	ng.TargetSize -= deleted
@@ -674,6 +674,19 @@ func (ngs *NodeGroups) RemoveInstances(ins ...*Instance) {
 			ng.Instances.Delete(in.ID)
 		}
 	}
+}
+
+func (ngs *NodeGroups) FindInstance(insId string) *Instance {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	for _, ng := range ngs.cache {
+		if ins := ng.Instances.Find(insId); ins != nil {
+			dump := *ins
+			return &dump
+		}
+	}
+	return nil
 }
 
 func generateInstanceByNode(node *corev1.Node) *Instance {
@@ -1052,27 +1065,42 @@ func (ngs *NodeGroups) loadNodeGroups() {
 	return
 }
 
-func (ng *NodeGroup) FilterInstanceByStatus(status ...Stage) []*Instance {
+func (ngs *NodeGroups) FilterInstanceByStages(stages ...Stage) []*Instance {
+	ngs.Lock()
+	defer ngs.Unlock()
+
 	filterInstance := make([]*Instance, 0, 10)
-	for _, ins := range ng.Instances {
-		for _, s := range status {
-			if ins.Stage == s {
-				incCopy := *ins
-				filterInstance = append(filterInstance, &incCopy)
+	for _, ng := range ngs.cache {
+		for _, ins := range ng.Instances {
+			for _, stage := range stages {
+				if ins.Stage == stage {
+					incCopy := *ins
+					filterInstance = append(filterInstance, &incCopy)
+				}
 			}
 		}
 	}
 	return filterInstance
 }
 
-func (ngs *NodeGroups) FilterInstanceByStatus(status ...Stage) []*Instance {
+func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...Result) []*Instance {
+	ngs.Lock()
+	defer ngs.Unlock()
+
 	filterInstance := make([]*Instance, 0, 10)
-	for _, ng := range ngs.List() {
-		ngs.Lock()
-		filterInstance = append(filterInstance, ng.FilterInstanceByStatus(status...)...)
-		ngs.Unlock()
+	for _, ng := range ngs.cache {
+		for _, ins := range ng.Instances {
+			if ins.Stage != stage {
+				continue
+			}
+			for _, result := range results {
+				if ins.Result == result {
+					incCopy := *ins
+					filterInstance = append(filterInstance, &incCopy)
+				}
+			}
+		}
 	}
-	// 未去重
 	return filterInstance
 }
 
@@ -1141,58 +1169,59 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 	// - 调用云厂商SDK创建instance
 	// - 将Instance状态设置为Creating
 	// - 根据实例ID生成instance的Id
-	go wait.Until(func() { routeInstanceByStatus(ngs, StagePending /*key*/, StagePending) }, time.Second*10, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StagePending /*key*/, StagePending) }, time.Second*3, ctx.Done())
 
 	// 已经调用了云厂商接口创建了instance, 等待运行起来
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageCreating /*key*/, StageCreating) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageCreating /*key*/, StageCreating) }, time.Second*3, ctx.Done())
 
 	// instance状态已经运行起来，等待执行AfterCratedHook
 	// - 执行AfterCreated Hook, 包含修改内核参数，修改hostname等。Hook需要支持幂等
 	// - 执行kubeadm join流程
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageCreated /*key*/, StageCreated) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageCreated /*key*/, StageCreated) }, time.Second*3, ctx.Done())
 
 	// - 包含添加label，污点
 	// - 当hook执行完成需要将instance状态更改为Running
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageJoined /*key*/, StageJoined) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageJoined /*key*/, StageJoined) }, time.Second*3, ctx.Done())
 
 	// 更新Instance的状态
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageRunning /*key*/, StageRunning, "") }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageRunning /*key*/, StageRunning, "") }, time.Minute, ctx.Done())
 
 	// 删除instance前等待执行BeforeDeleteHook
-	go wait.Until(func() { routeInstanceByStatus(ngs, StagePendingDeletion /*key*/, StagePendingDeletion) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StagePendingDeletion /*key*/, StagePendingDeletion) }, time.Second*3, ctx.Done())
 
 	// BeforeDeleteHook执行成功等待调用云厂商接口删除instance
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleting /*key*/, StageDeleting) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleting /*key*/, StageDeleting) }, time.Second*3, ctx.Done())
 
 	// 云厂商instance成功，instance记录保留一段时间后删除记录
-	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleted /*key*/, StageDeleted) }, time.Second*5, ctx.Done())
+	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleted /*key*/, StageDeleted) }, time.Hour, ctx.Done())
 
-	// 定时报告状态是Failed的instance
-	//go wait.Until(func() { routeInstanceByStatus(ngs, StageFailed /*key*/, StageFailed) }, time.Minute, ctx.Done())
-
-	go handleRouteInstances(ctx, ngs, StagePending, 1, ngs.ops.createParallelism, createInstance)
-	go handleRouteInstances(ctx, ngs, StageCreating, 1, 10, waitInstanceCreated)
-	go handleRouteInstances(ctx, ngs, StageCreated, 1, 3, execAfterCreatedHook)
-	go handleRouteInstances(ctx, ngs, StageJoined, 1, 10, waitJoined)
-	go handleRouteInstances(ctx, ngs, StageRunning, 1, 20, syncInstanceStatus)
-	go handleRouteInstances(ctx, ngs, StagePendingDeletion, 1, ngs.ops.deleteParallelism, execBeforeDeleteHook)
-	go handleRouteInstances(ctx, ngs, StageDeleting, 1, 3, deleteInstance)
-	go handleRouteInstances(ctx, ngs, StageDeleted, 1, 10, removeDeletedInstances)
-	//go handleRouteInstances(ctx, ngs, StageFailed, 1, 100, printFailedStatusInstances)
-	//go handleRouteInstances(ctx, ngs, StageUnknown, nil)
+	go handleRouteInstances(ctx, ngs, StagePending, ngs.ops.createParallelism, createInstance)
+	go handleRouteInstances(ctx, ngs, StageCreating, 10, waitInstanceCreated)
+	go handleRouteInstances(ctx, ngs, StageCreated, 3, execAfterCreatedHook)
+	go handleRouteInstances(ctx, ngs, StageJoined, 10, waitJoined)
+	go handleRouteInstances(ctx, ngs, StagePendingDeletion, ngs.ops.deleteParallelism, execBeforeDeleteHook)
+	go handleRouteInstances(ctx, ngs, StageDeleting, 3, deleteInstance)
+	go syncInstanceStatus(ctx, ngs)
+	go removeDeletedInstances(ctx, ngs)
 
 	return
 }
 
 func routeInstanceByStatus(ngs *NodeGroups, key Stage, status ...Stage) {
-	for _, in := range ngs.FilterInstanceByStatus(status...) {
+	for _, in := range ngs.FilterInstanceByStages(status...) {
 		if v, ok := ngs.instanceQueue[key]; ok {
-			v.Add(in, true)
+			if b := v.Add(in, true); b {
+				klog.V(9).Infof("add %s to instanceQueue(%s)", in.ID, key)
+			} else {
+				klog.V(9).Infof("add %s to instanceQueue(%s) but it existed", in.ID, key)
+			}
+		} else {
+			klog.Errorf("instanceQueue(%s) not defined", key)
 		}
 	}
 }
 
-func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, period int, maxSize int, handle func(context.Context, *NodeGroups, []*Instance)) {
+func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, parallelism int, handle func(context.Context, *NodeGroups, *Instance)) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
@@ -1203,28 +1232,43 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, perio
 
 	klog.V(1).Infof("run %s instances status handle", key)
 
-	tick := time.NewTicker(time.Second * time.Duration(period))
+	tick := time.NewTicker(time.Second)
 	for {
 		select {
 		case <-ctx.Done():
 			klog.V(1).Infof("shutdown %s instances status handle", key)
 			return
 		case <-tick.C:
-			instances := dumpElementsFromQueue(ngs.instanceQueue[key], maxSize, time.Second)
-			if len(instances) == 0 {
+			// 判断当前处于InProcess的数量
+			inProcessIns := ngs.FilterInstanceByStageAndResult(key, ResultInProcess)
+			// 已达到最大并发数量
+			if len(inProcessIns) >= parallelism {
 				continue
 			}
-			klog.V(5).Infof("there are %d %s instances need to handle", len(instances), key)
 
-			handle(ctx, ngs, instances)
+			inss := removeInstancesFromQueue(ngs.instanceQueue[key], parallelism-len(inProcessIns))
+			if len(inss) == 0 {
+				continue
+			}
 
-			removeElementsFromQueue(ngs.instanceQueue[key], len(instances))
+			handInss := make([]*Instance, 0, len(inss))
+			for _, ins := range inss {
+				if ins.Result == "" || ins.Result == ResultInit {
+					ins.Result = ResultInProcess
+					handInss = append(handInss, ins)
+				}
+			}
+			ngs.UpdateInstances(handInss...)
+
+			for _, ins := range handInss {
+				go handle(ctx, ngs, ins)
+			}
 		}
 	}
 }
 
 // 在t时间内从队列中获取size个元素(不会从队列中删除)
-func dumpElementsFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
+func dumpInstancesFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
 	if q == nil {
 		return nil
 	}
@@ -1265,7 +1309,7 @@ exit:
 }
 
 // 从队列尾部删除count个元素
-func removeElementsFromQueue[T *Instance](q *queue.Queue, count int) (ins []T) {
+func removeInstancesFromQueue[T *Instance](q *queue.Queue, count int) (ins []T) {
 	if q == nil {
 		return nil
 	}
@@ -1286,64 +1330,86 @@ func removeElementsFromQueue[T *Instance](q *queue.Queue, count int) (ins []T) {
 }
 
 // 从云厂商更新instance状态
-func syncInstanceStatus(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	classifiedIns := pcommon.ClassifiedInstancesByProviderID(instances)
+func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-	// 调用云厂商接口获取instance状态
-	for k, inss := range classifiedIns {
-		insIds := extractInstancesIDForSyncInstanceStatus(inss)
-
-		if len(insIds) == 0 {
-			continue
-		}
-
-		cp, err := provider.NewCloudprovider(inss[0].ProviderID, GetNodeGroups().CloudProviderOption())
-		if err != nil {
-			klog.Errorf("NewCloudprovider failed, %s", err)
-			continue
-		}
-
-		res, err := cp.InstancesStatus(ctx, insIds...)
-		if err != nil {
-			klog.Errorf("sync instances status failed, %s", err)
-		}
-
-		for _, ins := range inss {
-			_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
-			if status, ok := res[id]; ok {
-				switch status {
-				case pcommon.InstanceStatusCreating:
-					ins.Stage = StageCreating
-					ins.Result = ResultSuccess
-					ins.ErrorMsg = ""
-				case pcommon.InstanceStatusRunning:
-					ins.Stage = StageRunning
-					ins.Result = ResultSuccess
-					ins.ErrorMsg = ""
-				case pcommon.InstanceStatusDeleted:
-					ins.Stage = StageDeleted
-					ins.Result = ""
-				case pcommon.InstanceStatusFailed:
-					ins.Result = ResultFailed
-				case pcommon.InstanceStatusUnknown:
-					ins.Result = ResultUnknown
-				}
-			} else {
-				ins.Result = ResultUnknown
-				ins.ErrorMsg = "unknown status"
+	tick := time.NewTicker(time.Second * 5)
+	for {
+		select {
+		case <-ctx.Done():
+			klog.V(1).Infof("shutdown syncInstanceStatus")
+			return
+		case <-tick.C:
+			instances := removeInstancesFromQueue(ngs.instanceQueue[StageRunning], 20)
+			if len(instances) == 0 {
+				continue
 			}
-		}
 
-		// 更新Instance的状态
-		ngs.UpdateInstancesStatus(inss...)
-		klog.V(5).Infof("updated %d instances status by cloudprovider %s", len(inss), k)
+			classifiedIns := pcommon.ClassifiedInstancesByProviderID(instances)
+			for k, inss := range classifiedIns {
+				insIds := extractInstancesIDForSyncInstanceStatus(ngs, inss)
+				if len(insIds) == 0 {
+					continue
+				}
+
+				cp, err := provider.NewCloudprovider(inss[0].ProviderID, GetNodeGroups().CloudProviderOption())
+				if err != nil {
+					klog.Errorf("NewCloudprovider failed, %s", err)
+					continue
+				}
+
+				// 调用云厂商接口获取instance状态
+				res, err := cp.InstancesStatus(ctx, insIds...)
+				if err != nil {
+					klog.Errorf("sync instances status failed, %s", err)
+				}
+
+				for _, ins := range inss {
+					_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
+					if status, ok := res[id]; ok {
+						switch status {
+						case pcommon.InstanceStatusCreating:
+							ins.Stage = StageCreating
+							ins.Result = ResultSuccess
+							ins.ErrorMsg = ""
+						case pcommon.InstanceStatusRunning:
+							ins.Stage = StageRunning
+							ins.Result = ResultSuccess
+							ins.ErrorMsg = ""
+						case pcommon.InstanceStatusDeleted:
+							ins.Stage = StageDeleted
+							ins.Result = ResultSuccess
+						case pcommon.InstanceStatusFailed:
+							ins.Result = ResultFailed
+						case pcommon.InstanceStatusUnknown:
+							ins.Result = ResultUnknown
+						}
+					} else {
+						ins.Result = ResultUnknown
+						ins.ErrorMsg = "unknown status"
+					}
+				}
+
+				// 更新Instance的状态
+				ngs.UpdateInstancesStatus(inss...)
+				klog.V(5).Infof("updated %d instances status by cloudprovider %s", len(inss), k)
+			}
+
+		}
 	}
 }
 
-func extractInstancesIDForSyncInstanceStatus(inss []*Instance) []string {
+func extractInstancesIDForSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) []string {
 	insIds := make([]string, 0, len(inss))
 	for _, ins := range inss {
-		if ins.UpdateTime.Add(time.Minute * 5).Before(time.Now()) {
+		if v := ngs.FindInstance(ins.ID); v == nil {
+			continue
+		} else if v.Stage != StageRunning {
+			continue
+		}
+
+		if ins.Result == ResultInit || ins.Result == ResultUnknown || ins.UpdateTime.Add(time.Minute*5).Before(time.Now()) {
 			_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
 			insIds = append(insIds, id)
 		}
@@ -1352,121 +1418,141 @@ func extractInstancesIDForSyncInstanceStatus(inss []*Instance) []string {
 }
 
 // 调用云厂商接口创建instance
-func createInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
-	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
-			continue
-		}
+func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		ng, err := GetNodeGroups().FindNodeGroupByInstanceID(ins.ID)
-		if err != nil {
-			err = fmt.Errorf("find nodegroup by instance ID failed, %s", err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
+	}
 
-		insParam := GetNodeGroups().InstanceParameter(ng.InstanceParameter)
-		if insParam == nil {
-			err = fmt.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
+	ng, err := GetNodeGroups().FindNodeGroupByInstanceID(ins.ID)
+	if err != nil {
+		err = fmt.Errorf("find nodegroup by instance ID failed, %s", err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
 
-		cp, err := provider.NewCloudprovider(insParam.ProviderIdTemplate, GetNodeGroups().CloudProviderOption())
-		if err != nil {
-			err = fmt.Errorf("NewCloudprovider failed, %s", err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
+	insParam := GetNodeGroups().InstanceParameter(ng.InstanceParameter)
+	if insParam == nil {
+		err = fmt.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
 
-		klog.V(1).Infof("creatting instance(%s)...", ins.ID)
+	cp, err := provider.NewCloudprovider(insParam.ProviderIdTemplate, GetNodeGroups().CloudProviderOption())
+	if err != nil {
+		err = fmt.Errorf("NewCloudprovider failed, %s", err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
 
-		ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
-		insId, err := cp.CreateInstance(ctx1, insParam.Parameter)
-		cancel()
-		if err != nil {
-			err = fmt.Errorf("create instance(%s) failed, %s", ins.ID, err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-		} else {
-			providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
-			ins.ProviderID = pcommon.GenerateInstanceProviderID(providerName, account, region, insId)
-			ins.Stage = StageCreating
-			ins.Result = ""
-			ins.ErrorMsg = ""
-			klog.V(1).Infof("create instance(%s) success, ProviderID:%s", ins.ID, ins.ProviderID)
-			ngs.UpdateInstances(ins)
-		}
+	klog.V(1).Infof("creatting instance(%s)...", ins.ID)
 
-		select {
-		case <-ctx.Done():
-			return
-		}
+	ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
+	insId, err := cp.CreateInstance(ctx1, insParam.Parameter)
+	cancel()
+	if err != nil {
+		err = fmt.Errorf("create instance(%s) failed, %s", ins.ID, err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+	} else {
+		providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
+		ins.ProviderID = pcommon.GenerateInstanceProviderID(providerName, account, region, insId)
+		ins.Stage = StageCreating
+		ins.Result = ResultInit
+		ins.ErrorMsg = ""
+		klog.V(1).Infof("create instance(%s) success, ProviderID:%s", ins.ID, ins.ProviderID)
+		ngs.UpdateInstances(ins)
 	}
 }
 
 // 等待instance状态正常
-func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	// 调用云厂商接口获取instance状态
-	for _, ins := range instances {
-		if ins.Result == ResultFailed {
-			continue
-		}
+func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
-		if err != nil {
-			err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
-
-		_, _, _, insId, _ := pcommon.ExtractProviderID(ins.ProviderID)
-		status, err := cp.InstanceStatus(ctx, insId)
-		if err != nil {
-			err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
-
-		if status != pcommon.InstanceStatusRunning {
-			continue
-		}
-
-		ip, err := cp.InstanceIp(ctx, insId)
-		if err != nil {
-			err = fmt.Errorf("wait instance(%s) ip failed, %s", ins.ID, err)
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstances(ins)
-			klog.Error(err)
-			continue
-		}
-
-		ins.IP = ip
-		ins.Stage = StageCreated
-		ins.Result = ""
-		ins.ErrorMsg = ""
-		if ins.Name == "" && ins.IP != "" {
-			ins.Name = generateInstanceName(ins.IP)
-		}
-		ngs.UpdateInstances(ins)
-		klog.V(1).Infof("wait instance(%s) created success", ins.ID)
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
 	}
+
+	cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
+	if err != nil {
+		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
+
+	_, _, _, insId, _ := pcommon.ExtractProviderID(ins.ProviderID)
+	status, err := cp.InstanceStatus(ctx, insId)
+	if err != nil {
+		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
+
+	if status != pcommon.InstanceStatusRunning {
+		ins.Result = ResultInit
+		ins.ErrorMsg = ""
+		ngs.UpdateInstances(ins)
+		return
+	}
+
+	ip, err := cp.InstanceIp(ctx, insId)
+	if err != nil {
+		err = fmt.Errorf("wait instance(%s) ip failed, %s", ins.ID, err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
+
+	if ip == "" {
+		err = fmt.Errorf("wait instance(%s) ip failed, ip is null", ins.ID)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstances(ins)
+		klog.Error(err)
+		return
+	}
+
+	ins.IP = ip
+	ins.Stage = StageCreated
+	ins.Result = ""
+	ins.ErrorMsg = ""
+	if ins.Name == "" && ins.IP != "" {
+		ins.Name = generateInstanceName(ins.IP)
+	}
+	ngs.UpdateInstances(ins)
+	klog.V(1).Infof("wait instance(%s) created success", ins.ID)
 }
 
 func generateInstanceName(ip string) string {
@@ -1477,157 +1563,181 @@ func generateInstanceName(ip string) string {
 // 执行AfterCreated Hook
 // - 修改host name
 // - 调整内核参数
-func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed || ins.Result == ResultInProcess {
-			continue
-		}
+func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		ins.Result = ResultInProcess
-		ngs.UpdateInstancesStatus(ins)
-
-		start := time.Now()
-		klog.V(1).Infof("exec %s for intance(%s)...", AfterCreatedScript, ins.ID)
-		err := execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
-		if err != nil {
-			err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			klog.Error(err)
-		} else {
-			ins.Stage = StageJoined
-			ins.Result = ""
-			ins.ErrorMsg = ""
-			klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
-		}
-
-		// 更新Instance信息
-		ngs.UpdateInstancesStatus(ins)
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
 	}
+
+	start := time.Now()
+	klog.V(1).Infof("exec %s for intance(%s)...", AfterCreatedScript, ins.ID)
+	err := execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
+	if err != nil {
+		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		klog.Error(err)
+	} else {
+		ins.Stage = StageJoined
+		ins.Result = ResultInit
+		ins.ErrorMsg = ""
+		klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
+	}
+
+	// 更新Instance信息
+	ngs.UpdateInstancesStatus(ins)
 }
 
 // waitJoined等待在k8s集群就绪
-func waitJoined(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
-			continue
-		}
+func waitJoined(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		_, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
-		if err != nil {
-			ins.Result = ResultInProcess
-			ins.ErrorMsg = err.Error()
-			ngs.UpdateInstancesStatus(ins)
-			return
-		}
-
-		start := time.Now()
-		klog.V(1).Infof("patch lable for intance(%s)...", ins.ID)
-
-		// 设置标签和污点, 需要等待
-		err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
-		if err != nil {
-			err = fmt.Errorf("patch lable for intance(%s) failed, cost:%v, %s", ins.ID, time.Since(start), err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			klog.Error(err)
-		} else {
-			ins.Stage = StageRunning
-			ins.Result = ""
-			ins.ErrorMsg = ""
-			klog.V(1).Infof("patch lable for intance(%s) success, cost:%v", ins.ID, time.Since(start))
-		}
-
-		// 更新Instance信息
-		ngs.UpdateInstancesStatus(ins)
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
 	}
+
+	_, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
+	if err != nil {
+		ins.Result = ResultInProcess
+		ins.ErrorMsg = err.Error()
+		ngs.UpdateInstancesStatus(ins)
+		return
+	}
+
+	start := time.Now()
+	klog.V(1).Infof("patch lable for intance(%s)...", ins.ID)
+
+	// 设置标签和污点, 需要等待
+	err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
+	if err != nil {
+		err = fmt.Errorf("patch lable for intance(%s) failed, cost:%v, %s", ins.ID, time.Since(start), err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		klog.Error(err)
+	} else {
+		ins.Stage = StageRunning
+		ins.Result = ResultInit
+		ins.ErrorMsg = ""
+		klog.V(1).Infof("patch lable for intance(%s) success, cost:%v", ins.ID, time.Since(start))
+	}
+
+	// 更新Instance信息
+	ngs.UpdateInstancesStatus(ins)
 }
 
 // BeforeDelete Hook
-func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
-			continue
-		}
+func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		start := time.Now()
-		klog.V(1).Infof("exec %s for intance(%s)...", BeforeDeleteScript, ins.ID)
-		err := execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
-		if err != nil {
-			err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
-			klog.Error(err)
-		} else {
-			ins.Stage = StageDeleting
-			ins.Result = ""
-			ins.ErrorMsg = ""
-			klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", BeforeDeleteScript, ins.ID, time.Since(start))
-		}
-		// 更新Instance信息
-		ngs.UpdateInstances(ins)
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
 	}
+
+	start := time.Now()
+	klog.V(1).Infof("exec %s for intance(%s)...", BeforeDeleteScript, ins.ID)
+	err := execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
+	if err != nil {
+		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		klog.Error(err)
+	} else {
+		ins.Stage = StageDeleting
+		ins.Result = ResultInit
+		ins.ErrorMsg = ""
+		klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", BeforeDeleteScript, ins.ID, time.Since(start))
+	}
+	// 更新Instance信息
+	ngs.UpdateInstances(ins)
 }
 
 // deleteInstance 调用云厂商接口删除instance
-func deleteInstance(ctx context.Context, ngs *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		if ins.Result == ResultSuccess || ins.Result == ResultFailed {
-			continue
-		}
+func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-		klog.V(1).Infof("delete intance(%s)...", ins.ID)
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		klog.Errorf("instance(%s) not found", ins.ID)
+		return
+	} else if v.Result != ResultInProcess {
+		return
+	} else {
+		ins = v
+	}
 
-		ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
-		err := callDeleteInstance(ctx1, ngs, ins)
-		defer cancel()
+	klog.V(1).Infof("delete intance(%s)...", ins.ID)
+
+	ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
+	err := callDeleteInstance(ctx1, ngs, ins)
+	defer cancel()
+	if err != nil {
+		err = fmt.Errorf("delete intance(%s) failed, %s", ins.ID, err)
+		ins.Result = ResultFailed
+		ins.ErrorMsg = err.Error()
+		klog.Error(err)
+	} else {
+		klog.V(1).Infof("delete intance(%s) success", ins.ID)
+
+		err = DeleteNodeFromKubernetes(ctx1, ins.Name)
 		if err != nil {
-			err = fmt.Errorf("delete intance(%s) failed, %s", ins.ID, err)
+			err = fmt.Errorf("delete intance(%s) from kubernets failed, %s", ins.ID, err)
 			ins.Result = ResultFailed
 			ins.ErrorMsg = err.Error()
 			klog.Error(err)
 		} else {
-			klog.V(1).Infof("delete intance(%s) success", ins.ID)
-
-			err = DeleteNodeFromKubernetes(ctx1, ins.Name)
-			if err != nil {
-				err = fmt.Errorf("delete intance(%s) from kubernets failed, %s", ins.ID, err)
-				ins.Result = ResultFailed
-				ins.ErrorMsg = err.Error()
-				klog.Error(err)
-			} else {
-				// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
-				ins.Stage = StageDeleted
-				ins.Result = ""
-				ins.ErrorMsg = ""
-				klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
-			}
-		}
-
-		// 更新Instance信息
-		ngs.UpdateInstances(ins)
-
-		select {
-		case <-ctx.Done():
-			return
+			// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
+			ins.Stage = StageDeleted
+			ins.Result = ResultInit
+			ins.ErrorMsg = ""
+			klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
 		}
 	}
+	ngs.UpdateInstances(ins)
 }
 
 // removeDeletedInstances 移除之前已删除的instance
-func removeDeletedInstances(_ context.Context, ngs *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		if time.Now().After(ins.UpdateTime.Add(time.Hour * 24 * 15)) {
-			ngs.RemoveInstances(ins)
-			klog.V(1).Infof("remove intance(%s) success", ins.ID)
-		}
-	}
-}
+func removeDeletedInstances(ctx context.Context, ngs *NodeGroups) {
+	common.ContextWaitGroupAdd(ctx, 1)
+	defer common.ContextWaitGroupDone(ctx)
 
-// printFailedStatusInstances 报错错误状态的instance
-func printFailedStatusInstances(_ context.Context, _ *NodeGroups, instances []*Instance) {
-	for _, ins := range instances {
-		klog.Errorf("intance(%s) status is: %s, ErrorMsg: %s", ins.ID, ins.Stage, ins.ErrorMsg)
+	tick := time.NewTicker(time.Minute)
+	for {
+		select {
+		case <-ctx.Done():
+			klog.V(1).Infof("shutdown removeDeletedInstances")
+			return
+		case <-tick.C:
+			instances := removeInstancesFromQueue(ngs.instanceQueue[StageDeleted], 10)
+			if len(instances) == 0 {
+				continue
+			}
+
+			for _, ins := range instances {
+				if time.Now().After(ins.UpdateTime.Add(time.Hour * 24 * 15)) {
+					ngs.RemoveInstances(ins)
+					klog.V(1).Infof("remove intance(%s) success", ins.ID)
+				}
+			}
+		}
 	}
 }
 
@@ -1656,10 +1766,16 @@ func execHookScript(ctx context.Context, ngs *NodeGroups, ins *Instance, script 
 	envPath := fmt.Sprintf("%s/hooks/env", remoteBaseDir)
 	logPath := strings.TrimSuffix(remote, ".sh") + ".log"
 
-	// TODO 机器刚启动等待ssh就绪
-	executor, err := script_executor.NewScriptExecutor(generateSshInfo(ins))
-	if err != nil {
-		err = fmt.Errorf("NewScriptExecutor for %s failed, %s", script, err)
+	var err error
+	var executor *script_executor.ScriptExecutor
+	if err = retry.Do(ctx, retry.WithMaxRetries(3, retry.NewExponential(time.Second*5)),
+		func(_ context.Context) error {
+			executor, err = script_executor.NewScriptExecutor(generateSshInfo(ins))
+			if err != nil {
+				return retry.RetryableError(fmt.Errorf("NewScriptExecutor for %s failed, %s", script, err))
+			}
+			return nil
+		}); err != nil {
 		klog.Error(err)
 		return err
 	}

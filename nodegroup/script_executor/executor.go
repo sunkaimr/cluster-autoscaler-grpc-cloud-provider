@@ -43,7 +43,7 @@ func NewScriptExecutor(host, port, user, passwd, keyPath string) (*ScriptExecuto
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
+		Timeout:         5 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", host+":"+port, sshConfig)
@@ -219,7 +219,8 @@ func (se *ScriptExecutor) RunCommand(ctx context.Context, cmd string) (string, e
 
 // ExecuteScript 执行远程脚本并捕获输出
 func (se *ScriptExecutor) ExecuteScript(ctx context.Context, scriptPath, logPath string) (string, error) {
-	cmd := fmt.Sprintf("%s 2>&1 | tee %s", scriptPath, logPath)
+	//cmd := fmt.Sprintf("%s 2>&1 | tee %s", scriptPath, logPath)
+	cmd := fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s", scriptPath, logPath)
 	output, err := se.RunCommand(ctx, cmd)
 	if err != nil {
 		return output, fmt.Errorf("script execution failed: %v", err)

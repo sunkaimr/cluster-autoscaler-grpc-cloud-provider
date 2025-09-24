@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/pkg/sftp v1.10.1
+	github.com/sethvargo/go-retry v0.3.0
 	github.com/spf13/viper v1.4.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm v1.1.0
