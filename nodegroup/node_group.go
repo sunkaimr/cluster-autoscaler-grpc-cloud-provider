@@ -695,9 +695,16 @@ func generateInstanceByNode(node *corev1.Node) *Instance {
 	ins.ID = utils.RandStr(8)
 	ins.Name = node.Name
 	ins.ProviderID = node.Spec.ProviderID
+
 	ins.Stage = StageRunning
 	ins.Result = ResultUnknown
-	ins.ErrorMsg = "unknown status"
+	ins.ErrorMsg = ""
+	for _, v := range node.Status.Conditions {
+		if v.Type == corev1.NodeReady && v.Status == corev1.ConditionTrue {
+			ins.Result = ResultSuccess
+			break
+		}
+	}
 	for _, addr := range node.Status.Addresses {
 		if addr.Type == "InternalIP" {
 			ins.IP = addr.Address
@@ -1196,11 +1203,11 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 	go wait.Until(func() { routeInstanceByStatus(ngs, StageDeleted /*key*/, StageDeleted) }, time.Hour, ctx.Done())
 
 	go handleRouteInstances(ctx, ngs, StagePending, ngs.ops.createParallelism, createInstance)
-	go handleRouteInstances(ctx, ngs, StageCreating, 10, waitInstanceCreated)
-	go handleRouteInstances(ctx, ngs, StageCreated, 3, execAfterCreatedHook)
-	go handleRouteInstances(ctx, ngs, StageJoined, 10, waitJoined)
+	go handleRouteInstances(ctx, ngs, StageCreating, ngs.ops.createParallelism, waitInstanceCreated)
+	go handleRouteInstances(ctx, ngs, StageCreated, ngs.ops.createParallelism, execAfterCreatedHook)
+	go handleRouteInstances(ctx, ngs, StageJoined, ngs.ops.createParallelism, waitJoined)
 	go handleRouteInstances(ctx, ngs, StagePendingDeletion, ngs.ops.deleteParallelism, execBeforeDeleteHook)
-	go handleRouteInstances(ctx, ngs, StageDeleting, 3, deleteInstance)
+	go handleRouteInstances(ctx, ngs, StageDeleting, ngs.ops.deleteParallelism, deleteInstance)
 	go syncInstanceStatus(ctx, ngs)
 	go removeDeletedInstances(ctx, ngs)
 
@@ -1348,9 +1355,15 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 
 			classifiedIns := pcommon.ClassifiedInstancesByProviderID(instances)
 			for k, inss := range classifiedIns {
-				insIds := extractInstancesIDForSyncInstanceStatus(ngs, inss)
-				if len(insIds) == 0 {
+				inss = filterSyncInstanceStatus(ngs, inss)
+				if len(inss) == 0 {
 					continue
+				}
+
+				insIds := make([]string, 0, len(inss))
+				for _, ins := range inss {
+					_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
+					insIds = append(insIds, id)
 				}
 
 				cp, err := provider.NewCloudprovider(inss[0].ProviderID, GetNodeGroups().CloudProviderOption())
@@ -1389,6 +1402,7 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 						ins.Result = ResultUnknown
 						ins.ErrorMsg = "unknown status"
 					}
+					klog.V(5).Infof("update instance(%s) staus is %s", ins.ID, ins.Result)
 				}
 
 				// 更新Instance的状态
@@ -1400,8 +1414,8 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 	}
 }
 
-func extractInstancesIDForSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) []string {
-	insIds := make([]string, 0, len(inss))
+func filterSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) []*Instance {
+	filterIns := make([]*Instance, 0, len(inss))
 	for _, ins := range inss {
 		if v := ngs.FindInstance(ins.ID); v == nil {
 			continue
@@ -1410,11 +1424,10 @@ func extractInstancesIDForSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) 
 		}
 
 		if ins.Result == ResultInit || ins.Result == ResultUnknown || ins.UpdateTime.Add(time.Minute*5).Before(time.Now()) {
-			_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
-			insIds = append(insIds, id)
+			filterIns = append(filterIns, ins)
 		}
 	}
-	return insIds
+	return filterIns
 }
 
 // 调用云厂商接口创建instance
@@ -1706,7 +1719,7 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		} else {
 			// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
 			ins.Stage = StageDeleted
-			ins.Result = ResultInit
+			ins.Result = ResultSuccess
 			ins.ErrorMsg = ""
 			klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
 		}
