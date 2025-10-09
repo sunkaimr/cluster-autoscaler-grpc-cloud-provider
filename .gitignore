@@ -1,6 +1,6 @@
 .idea
 .stignore
 go.sum
-nodegroup-test-config.yaml
+nodegroup-config-demo.yaml
 sync.ffs_db
 kube_config

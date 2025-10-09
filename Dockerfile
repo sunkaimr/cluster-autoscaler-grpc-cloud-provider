@@ -1,18 +1,21 @@
-# Copyright 2022 The Kubernetes Authors. All rights reserved
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-ARG BASEIMAGE=gcr.io/distroless/static:latest-amd64
-FROM $BASEIMAGE
+FROM cowell-images.tencentcloudcr.com/cowellpi/ubuntu:22.04
 
-COPY ca-external-grpc-cloud-provider-amd64 /ca-external-grpc-cloud-provider
-CMD ["/ca-external-grpc-provider"]
+LABEL maintainer="sunkai"
+
+ENV TZ=Asia/Shanghai
+RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone  \
+    && apt-get update \
+    && apt-get install -y tzdata dumb-init bash curl \
+    && apt-get clean \
+    && apt-get autoclean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+COPY cloud-config.cfg /opt/cloud-config.cfg
+COPY nodegroup-config.yaml /opt/nodegroup-config.yaml
+COPY hooks/* /opt/hooks/
+COPY cluster-autoscaler-grpc-cloud-provider /opt/cluster-autoscaler-grpc-cloud-provider
+WORKDIR /opt/
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/opt/cluster-autoscaler-grpc-cloud-provider"]

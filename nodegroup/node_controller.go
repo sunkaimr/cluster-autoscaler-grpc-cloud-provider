@@ -3,6 +3,8 @@ package nodegroup
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"math"
 	"reflect"
 	"time"
@@ -22,7 +24,6 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 	_ "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
@@ -43,17 +44,23 @@ func NewKubeClient() *kubernetes.Clientset {
 		return kubeClient
 	}
 
-	// 如果在k8s集群外部使用需要通过k8s的config文件来创建client
-	cfg, err := clientcmd.BuildConfigFromFlags("", "kube_config")
-	if err != nil {
-		klog.Exitf("Error building kubeconfig: %s", err.Error())
-	}
+	kubeconfig := GetNodeGroups().ops.kubeConfig
 
-	// 在集群群内部使用，如运行在k8s的pod中通过以下方式创建client
-	//cfg, err := rest.InClusterConfig()
-	//if err != nil {
-	//	klog.Exitf("Error building kubeconfig: %s", err.Error())
-	//}
+	var err error
+	var cfg *rest.Config
+	if kubeconfig != "" {
+		// 如果在k8s集群外部使用需要通过k8s的config文件来创建client
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			klog.Exitf("Error building kubeconfig: %s", err.Error())
+		}
+	} else {
+		// 在集群群内部使用，如运行在k8s的pod中通过以下方式创建client
+		cfg, err = rest.InClusterConfig()
+		if err != nil {
+			klog.Exitf("Error building kubeconfig: %s", err.Error())
+		}
+	}
 
 	kubeClient, err = kubernetes.NewForConfig(cfg)
 	if err != nil {

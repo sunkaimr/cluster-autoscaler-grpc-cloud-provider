@@ -26,6 +26,7 @@ var (
 	address           = flag.String("address", ":8086", "The address to expose the grpc service.")
 	cloudProviderFlag = flag.String("cloud-provider", cloudprovider.ExternalGrpcProviderName, "cloud provider type, only support 'externalgrpc'")
 	cloudConfig       = flag.String("cloud-config", "cloud-config.cfg", "The path to the cloud provider configuration file.")
+	kubeConfig        = flag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
 	ns                = flag.String("namespace", "kube-system", "which namespace the grpc-provider running in kubernetes")
 	cm                = flag.String("nodegroup-status-cm", "nodegroup-status", "the config-map name of save nodegroup status")
 	nodeGroupConfig   = flag.String("nodegroup-config", "nodegroup-config.yaml", "The path to the nodegroup configuration file.")
@@ -34,10 +35,18 @@ var (
 	deleteParallelism = flag.Int("delete-parallelism", 1, "Maximum number of concurrent delete instance allowed. Limits how many instances can be deleted at the same time.")
 )
 
+var (
+	gitCommit string
+	buildTime string
+	goVersion string
+	version   string
+)
+
 var grpcServer *grpc.Server
 
 func main() {
 	klog.InitFlags(nil)
+	klog.Infof("version: %s ,gitCommit: %s, buildTime :%s, goVersion :%s", version, gitCommit, buildTime, goVersion)
 	kubeFlag.InitFlags()
 
 	grpcServer = grpc.NewServer()
@@ -56,6 +65,7 @@ func main() {
 		ctx,
 		ngs.WithOpsNamespace(*ns),
 		ngs.WithOpsStatusConfigMap(*cm),
+		ngs.WithOpsKubeConfig(*kubeConfig),
 		ngs.WithOpsConfigFile(*nodeGroupConfig),
 		ngs.WithOpsHooksPath(*hooksPath),
 		ngs.WithCreateParallelism(*createParallelism),

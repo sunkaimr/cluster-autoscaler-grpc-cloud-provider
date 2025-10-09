@@ -19,25 +19,25 @@ const (
 	StageDeleted         Stage = "Deleted"         // 云厂商instance成功，instance记录保留一段时间后删除记录
 )
 
-type Result string
+type Status string
 
 const (
-	ResultInit      = "Init"      // 初始状态
-	ResultInProcess = "InProcess" // 正在处理中
-	ResultSuccess   = "Success"   // 执行成功
-	ResultFailed    = "Failed"    // 执行失败
-	ResultUnknown   = "Unknown"   // 未知状态，只有Running时会用到
+	StatusInit      = "Init"      // 初始状态
+	StatusInProcess = "InProcess" // 正在处理中
+	StatusSuccess   = "Success"   // 执行成功
+	StatusFailed    = "Failed"    // 执行失败
+	StatusUnknown   = "Unknown"   // 未知状态，只有Running时会用到
 )
 
 type Instance struct {
 	ID         string    `json:"id" yaml:"id"`
-	Name       string    `json:"name" yaml:"name"`                             // 节点在kubernetes中的名称
-	IP         string    `json:"ip" yaml:"ip"`                                 // 节点的IP地址
-	ProviderID string    `json:"providerID" yaml:"providerID"`                 // 节点在云上的ID，格式如：externalgrpc://<provider>/<account>/<region>/<instanceID>
-	Stage      Stage     `json:"stage" yaml:"stage"`                           // 节点处于那个阶段
-	Result     Result    `json:"result" yaml:"result"`                         // 该阶段的执行结果
-	ErrorMsg   string    `json:"errorMsg,omitempty" yaml:"errorMsg,omitempty"` // 操作失败时的详细信息
-	UpdateTime time.Time `json:"updateTime" yaml:"updateTime"`                 // 信息更新时间
+	Name       string    `json:"name" yaml:"name"`                       // 节点在kubernetes中的名称
+	IP         string    `json:"ip" yaml:"ip"`                           // 节点的IP地址
+	ProviderID string    `json:"providerID" yaml:"providerID"`           // 节点在云上的ID，格式如：externalgrpc://<provider>/<account>/<region>/<instanceID>
+	Stage      Stage     `json:"stage" yaml:"stage"`                     // 节点处于那个阶段
+	Status     Status    `json:"status" yaml:"status"`                   // 该阶段的执行结果
+	Error      string    `json:"error,omitempty" yaml:"error,omitempty"` // 操作失败时的详细信息
+	UpdateTime time.Time `json:"updateTime" yaml:"updateTime"`           // 信息更新时间
 }
 
 type InstanceList []*Instance

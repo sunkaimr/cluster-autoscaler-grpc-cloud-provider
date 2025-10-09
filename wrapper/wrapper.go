@@ -263,8 +263,8 @@ func stateMapping(ngInstance *instance.Instance) *protos.InstanceStatus {
 	default:
 		pbStatus.InstanceState = protos.InstanceStatus_unspecified
 		pbStatus.ErrorInfo = &protos.InstanceErrorInfo{
-			ErrorCode:    ngInstance.ErrorMsg,
-			ErrorMessage: ngInstance.ErrorMsg,
+			ErrorCode:    ngInstance.Error,
+			ErrorMessage: ngInstance.Error,
 		}
 	}
 	return pbStatus

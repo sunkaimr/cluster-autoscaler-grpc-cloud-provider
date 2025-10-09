@@ -99,6 +99,7 @@ type NodeGroups struct {
 }
 
 type nodeGroupsOps struct {
+	kubeConfig        string
 	configFile        string
 	nameSpace         string
 	statusConfigMap   string // "nodegroup-status"
@@ -202,6 +203,13 @@ func (ngs *NodeGroups) Run(ctx context.Context, ops ...func() error) error {
 func (ngs *NodeGroups) WithOpsConfigFile(f string) func() error {
 	return func() error {
 		ngs.ops.configFile = f
+		return nil
+	}
+}
+
+func (ngs *NodeGroups) WithOpsKubeConfig(f string) func() error {
+	return func() error {
+		ngs.ops.kubeConfig = f
 		return nil
 	}
 }
@@ -444,8 +452,8 @@ func (ngs *NodeGroups) NodeGroupIncreaseSize(id string /*nodegroup id*/, num int
 			IP:         "", // instance创建好才知道
 			ProviderID: "", // instance创建好才知道
 			Stage:      StagePending,
-			Result:     ResultInit,
-			ErrorMsg:   "",
+			Status:     StatusInit,
+			Error:      "",
 			UpdateTime: time.Now(),
 		})
 	}
@@ -581,8 +589,8 @@ func (ngs *NodeGroups) DeleteNode(nodeName string) {
 			}
 
 			ins.Stage = StagePendingDeletion
-			ins.Result = ResultInit
-			ins.ErrorMsg = ""
+			ins.Status = StatusInit
+			ins.Error = ""
 		}
 	}
 }
@@ -630,8 +638,8 @@ func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) er
 
 		klog.V(0).Infof("nodegroup(%s) node(%s) is %s and marked %s", ng.Id, ins.Name, ins.Stage, StagePendingDeletion)
 		ins.Stage = StagePendingDeletion
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		deleted++
 	}
 	ng.TargetSize -= deleted
@@ -697,11 +705,11 @@ func generateInstanceByNode(node *corev1.Node) *Instance {
 	ins.ProviderID = node.Spec.ProviderID
 
 	ins.Stage = StageRunning
-	ins.Result = ResultUnknown
-	ins.ErrorMsg = ""
+	ins.Status = StatusUnknown
+	ins.Error = ""
 	for _, v := range node.Status.Conditions {
 		if v.Type == corev1.NodeReady && v.Status == corev1.ConditionTrue {
-			ins.Result = ResultSuccess
+			ins.Status = StatusSuccess
 			break
 		}
 	}
@@ -1090,7 +1098,7 @@ func (ngs *NodeGroups) FilterInstanceByStages(stages ...Stage) []*Instance {
 	return filterInstance
 }
 
-func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...Result) []*Instance {
+func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...Status) []*Instance {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -1101,7 +1109,7 @@ func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...Re
 				continue
 			}
 			for _, result := range results {
-				if ins.Result == result {
+				if ins.Status == result {
 					incCopy := *ins
 					filterInstance = append(filterInstance, &incCopy)
 				}
@@ -1119,8 +1127,8 @@ func (ngs *NodeGroups) UpdateInstanceStatus(ins *Instance) error {
 		for _, v := range ng.Instances {
 			if v.ID == ins.ID {
 				v.Stage = ins.Stage
-				v.Result = ins.Result
-				v.ErrorMsg = ins.ErrorMsg
+				v.Status = ins.Status
+				v.Error = ins.Error
 				v.UpdateTime = time.Now()
 				return nil
 			}
@@ -1138,8 +1146,8 @@ func (ngs *NodeGroups) UpdateInstancesStatus(ins ...*Instance) {
 			for _, i := range ins {
 				if cacheIns.ID == i.ID {
 					cacheIns.Stage = i.Stage
-					cacheIns.Result = i.Result
-					cacheIns.ErrorMsg = i.ErrorMsg
+					cacheIns.Status = i.Status
+					cacheIns.Error = i.Error
 					cacheIns.UpdateTime = time.Now()
 				}
 			}
@@ -1159,8 +1167,8 @@ func (ngs *NodeGroups) UpdateInstances(ins ...*Instance) {
 					cacheIns.IP = i.IP
 					cacheIns.ProviderID = i.ProviderID
 					cacheIns.Stage = i.Stage
-					cacheIns.Result = i.Result
-					cacheIns.ErrorMsg = i.ErrorMsg
+					cacheIns.Status = i.Status
+					cacheIns.Error = i.Error
 					cacheIns.UpdateTime = time.Now()
 				}
 			}
@@ -1247,7 +1255,7 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 			return
 		case <-tick.C:
 			// 判断当前处于InProcess的数量
-			inProcessIns := ngs.FilterInstanceByStageAndResult(key, ResultInProcess)
+			inProcessIns := ngs.FilterInstanceByStageAndResult(key, StatusInProcess)
 			// 已达到最大并发数量
 			if len(inProcessIns) >= parallelism {
 				continue
@@ -1260,8 +1268,8 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 
 			handInss := make([]*Instance, 0, len(inss))
 			for _, ins := range inss {
-				if ins.Result == "" || ins.Result == ResultInit {
-					ins.Result = ResultInProcess
+				if ins.Status == "" || ins.Status == StatusInit {
+					ins.Status = StatusInProcess
 					handInss = append(handInss, ins)
 				}
 			}
@@ -1384,25 +1392,25 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 						switch status {
 						case pcommon.InstanceStatusCreating:
 							ins.Stage = StageCreating
-							ins.Result = ResultSuccess
-							ins.ErrorMsg = ""
+							ins.Status = StatusSuccess
+							ins.Error = ""
 						case pcommon.InstanceStatusRunning:
 							ins.Stage = StageRunning
-							ins.Result = ResultSuccess
-							ins.ErrorMsg = ""
+							ins.Status = StatusSuccess
+							ins.Error = ""
 						case pcommon.InstanceStatusDeleted:
 							ins.Stage = StageDeleted
-							ins.Result = ResultSuccess
+							ins.Status = StatusSuccess
 						case pcommon.InstanceStatusFailed:
-							ins.Result = ResultFailed
+							ins.Status = StatusFailed
 						case pcommon.InstanceStatusUnknown:
-							ins.Result = ResultUnknown
+							ins.Status = StatusUnknown
 						}
 					} else {
-						ins.Result = ResultUnknown
-						ins.ErrorMsg = "unknown status"
+						ins.Status = StatusUnknown
+						ins.Error = "unknown status"
 					}
-					klog.V(5).Infof("update instance(%s) staus is %s", ins.ID, ins.Result)
+					klog.V(6).Infof("update instance(%s) staus is %s", ins.ID, ins.Status)
 				}
 
 				// 更新Instance的状态
@@ -1423,7 +1431,7 @@ func filterSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) []*Instance {
 			continue
 		}
 
-		if ins.Result == ResultInit || ins.Result == ResultUnknown || ins.UpdateTime.Add(time.Minute*5).Before(time.Now()) {
+		if ins.Status == StatusInit || ins.Status == StatusUnknown || ins.UpdateTime.Add(time.Minute*5).Before(time.Now()) {
 			filterIns = append(filterIns, ins)
 		}
 	}
@@ -1438,7 +1446,7 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1447,8 +1455,8 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	ng, err := GetNodeGroups().FindNodeGroupByInstanceID(ins.ID)
 	if err != nil {
 		err = fmt.Errorf("find nodegroup by instance ID failed, %s", err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1457,8 +1465,8 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	insParam := GetNodeGroups().InstanceParameter(ng.InstanceParameter)
 	if insParam == nil {
 		err = fmt.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1467,8 +1475,8 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	cp, err := provider.NewCloudprovider(insParam.ProviderIdTemplate, GetNodeGroups().CloudProviderOption())
 	if err != nil {
 		err = fmt.Errorf("NewCloudprovider failed, %s", err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1481,16 +1489,16 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	cancel()
 	if err != nil {
 		err = fmt.Errorf("create instance(%s) failed, %s", ins.ID, err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 	} else {
 		providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
 		ins.ProviderID = pcommon.GenerateInstanceProviderID(providerName, account, region, insId)
 		ins.Stage = StageCreating
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		klog.V(1).Infof("create instance(%s) success, ProviderID:%s", ins.ID, ins.ProviderID)
 		ngs.UpdateInstances(ins)
 	}
@@ -1504,7 +1512,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1513,8 +1521,8 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
 	if err != nil {
 		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1524,16 +1532,16 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	status, err := cp.InstanceStatus(ctx, insId)
 	if err != nil {
 		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
 	}
 
 	if status != pcommon.InstanceStatusRunning {
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		ngs.UpdateInstances(ins)
 		return
 	}
@@ -1541,8 +1549,8 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	ip, err := cp.InstanceIp(ctx, insId)
 	if err != nil {
 		err = fmt.Errorf("wait instance(%s) ip failed, %s", ins.ID, err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1550,8 +1558,8 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 
 	if ip == "" {
 		err = fmt.Errorf("wait instance(%s) ip failed, ip is null", ins.ID)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		ngs.UpdateInstances(ins)
 		klog.Error(err)
 		return
@@ -1559,8 +1567,8 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 
 	ins.IP = ip
 	ins.Stage = StageCreated
-	ins.Result = ""
-	ins.ErrorMsg = ""
+	ins.Status = ""
+	ins.Error = ""
 	if ins.Name == "" && ins.IP != "" {
 		ins.Name = generateInstanceName(ins.IP)
 	}
@@ -1583,7 +1591,7 @@ func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1594,13 +1602,13 @@ func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	err := execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
 	if err != nil {
 		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		klog.Error(err)
 	} else {
 		ins.Stage = StageJoined
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", AfterCreatedScript, ins.ID, time.Since(start))
 	}
 
@@ -1616,7 +1624,7 @@ func waitJoined(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1624,8 +1632,8 @@ func waitJoined(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 
 	_, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
 	if err != nil {
-		ins.Result = ResultInProcess
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusInProcess
+		ins.Error = err.Error()
 		ngs.UpdateInstancesStatus(ins)
 		return
 	}
@@ -1637,13 +1645,13 @@ func waitJoined(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	err = patchNodeNodeGroupTemplate(ctx, ngs, ins)
 	if err != nil {
 		err = fmt.Errorf("patch lable for intance(%s) failed, cost:%v, %s", ins.ID, time.Since(start), err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		klog.Error(err)
 	} else {
 		ins.Stage = StageRunning
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		klog.V(1).Infof("patch lable for intance(%s) success, cost:%v", ins.ID, time.Since(start))
 	}
 
@@ -1659,7 +1667,7 @@ func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1670,13 +1678,13 @@ func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	err := execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
 	if err != nil {
 		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		klog.Error(err)
 	} else {
 		ins.Stage = StageDeleting
-		ins.Result = ResultInit
-		ins.ErrorMsg = ""
+		ins.Status = StatusInit
+		ins.Error = ""
 		klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", BeforeDeleteScript, ins.ID, time.Since(start))
 	}
 	// 更新Instance信息
@@ -1691,7 +1699,7 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if v := ngs.FindInstance(ins.ID); v == nil {
 		klog.Errorf("instance(%s) not found", ins.ID)
 		return
-	} else if v.Result != ResultInProcess {
+	} else if v.Status != StatusInProcess {
 		return
 	} else {
 		ins = v
@@ -1704,8 +1712,8 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	defer cancel()
 	if err != nil {
 		err = fmt.Errorf("delete intance(%s) failed, %s", ins.ID, err)
-		ins.Result = ResultFailed
-		ins.ErrorMsg = err.Error()
+		ins.Status = StatusFailed
+		ins.Error = err.Error()
 		klog.Error(err)
 	} else {
 		klog.V(1).Infof("delete intance(%s) success", ins.ID)
@@ -1713,14 +1721,14 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = DeleteNodeFromKubernetes(ctx1, ins.Name)
 		if err != nil {
 			err = fmt.Errorf("delete intance(%s) from kubernets failed, %s", ins.ID, err)
-			ins.Result = ResultFailed
-			ins.ErrorMsg = err.Error()
+			ins.Status = StatusFailed
+			ins.Error = err.Error()
 			klog.Error(err)
 		} else {
 			// 将instance标记为已删除，等待7天或15天才把instance从记录里删除
 			ins.Stage = StageDeleted
-			ins.Result = ResultSuccess
-			ins.ErrorMsg = ""
+			ins.Status = StatusSuccess
+			ins.Error = ""
 			klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
 		}
 	}
