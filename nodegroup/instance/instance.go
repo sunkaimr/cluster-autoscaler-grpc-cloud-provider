@@ -54,10 +54,6 @@ func (c *InstanceList) Add(ins *Instance) {
 func (c *InstanceList) Delete(id string) {
 	for i, v := range *c {
 		if v.ID == id {
-			if i == len(*c) {
-				*c = (*c)[:i]
-				return
-			}
 			*c = append((*c)[:i], (*c)[i+1:]...)
 			return
 		}
@@ -67,10 +63,6 @@ func (c *InstanceList) Delete(id string) {
 func (c *InstanceList) DeleteByName(name string) {
 	for i, v := range *c {
 		if v.Name == name {
-			if i == len(*c) {
-				*c = (*c)[:i]
-				return
-			}
 			*c = append((*c)[:i], (*c)[i+1:]...)
 			return
 		}

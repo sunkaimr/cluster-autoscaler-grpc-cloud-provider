@@ -123,13 +123,17 @@ func (c *Client) InstanceIp(ctx context.Context, insId string) (string, error) {
 }
 
 // InstancesStatus 查询多个instance的状态
-func (c *Client) InstancesStatus(ctx context.Context, insIds ...string) (map[string]InstanceStatus, error) {
+// 查不到的instance状态要设置为Unknown
+func (c *Client) InstancesStatus(ctx context.Context, insIds ...string) (map[string] /*insId*/ InstanceStatus, error) {
 	var limit = int64(len(insIds))
 
 	req := cvm.NewDescribeInstancesRequest()
 	req.Limit = &limit
-	for i, _ := range insIds {
+
+	res := make(map[string]InstanceStatus, len(insIds))
+	for i, insId := range insIds {
 		req.InstanceIds = append(req.InstanceIds, &insIds[i])
+		res[insId] = InstanceStatusUnknown
 	}
 
 	resp, err := c.client.DescribeInstancesWithContext(ctx, req)
@@ -137,7 +141,6 @@ func (c *Client) InstancesStatus(ctx context.Context, insIds ...string) (map[str
 		return nil, fmt.Errorf("DescribeInstances failed, %s", err)
 	}
 
-	res := make(map[string]InstanceStatus, len(resp.Response.InstanceSet))
 	for _, respIns := range resp.Response.InstanceSet {
 		res[*respIns.InstanceId] = statusMapping(*respIns.InstanceState)
 	}

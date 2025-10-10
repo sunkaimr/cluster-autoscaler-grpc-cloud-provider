@@ -60,7 +60,7 @@ var KubeReservedTaints = []string{
 }
 
 var (
-	NotFoundErr        = errors.New("not found nodegroup")
+	NotFoundErr        = errors.New("nodegroup not found")
 	MatchedMultipleErr = errors.New("matched multiple nodegroup")
 
 	nodeGroups = &NodeGroups{
@@ -451,12 +451,27 @@ func (ngs *NodeGroups) NodeGroupIncreaseSize(id string /*nodegroup id*/, num int
 
 	ng.TargetSize += increaseSize
 
-	for i := 0; i < int(increaseSize); i++ {
+	insMap := make(map[string]struct{}, 100)
+	for _, n := range ngs.cache {
+		for _, ins := range n.Instances {
+			insMap[ins.ID] = struct{}{}
+		}
+	}
+
+	for i := 0; i < increaseSize; i++ {
+		insId := utils.RandStr(8)
+		for {
+			if _, ok := insMap[insId]; !ok {
+				break
+			}
+			insId = utils.RandStr(8)
+		}
+
 		ng.Instances = append(ng.Instances, &Instance{
-			ID:         utils.RandStr(8),
-			Name:       "", // instance创建好才知道
-			IP:         "", // instance创建好才知道
-			ProviderID: "", // instance创建好才知道
+			ID:         insId, // 生成唯一ID
+			Name:       "",    // instance创建好才知道
+			IP:         "",    // instance创建好才知道
+			ProviderID: "",    // instance创建好才知道
 			Stage:      StagePending,
 			Status:     StatusInit,
 			Error:      "",
