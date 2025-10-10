@@ -80,6 +80,7 @@ var (
 			StageDeleting:        queue.New(),
 			StageDeleted:         queue.New(),
 		},
+		matchedMultipleNodeGroup: make(map[string][]string),
 	}
 )
 
@@ -92,10 +93,11 @@ type nodeGroupCache []*NodeGroup
 
 type NodeGroups struct {
 	sync.Mutex
-	instanceQueue       map[Stage]*queue.Queue
-	ops                 *nodeGroupsOps
-	cache               nodeGroupCache
-	cloudProviderOption provider.CloudProviderOption
+	instanceQueue            map[Stage]*queue.Queue
+	ops                      *nodeGroupsOps
+	cache                    nodeGroupCache
+	matchedMultipleNodeGroup map[string][]string // 缓存哪些node匹配到了多个nodegroup
+	cloudProviderOption      provider.CloudProviderOption
 }
 
 type nodeGroupsOps struct {
@@ -117,7 +119,7 @@ type NodeGroup struct {
 	MaxSize int `json:"maxSize" yaml:"maxSize"`
 	// 节点池目标节点数量
 	TargetSize int `json:"targetSize" yaml:"targetSize"`
-	//
+	// 缩容的相关配置项
 	AutoscalingOptions *AutoscalingOptions `json:"autoscalingOptions" yaml:"autoscalingOptions"`
 	// 匹配节点组的模板
 	NodeTemplate *NodeTemplate `json:"nodeTemplate" yaml:"nodeTemplate"`
@@ -310,7 +312,7 @@ func (ngs *NodeGroups) List() []NodeGroup {
 
 // MatchNodeGroup 查找Node所属的NodeGroup
 func (ngs *NodeGroups) MatchNodeGroup(node *corev1.Node) (NodeGroup, error) {
-	var matchNg []NodeGroup
+	var matchedNg []NodeGroup
 
 	ngs.Lock()
 	defer ngs.Unlock()
@@ -344,20 +346,24 @@ func (ngs *NodeGroups) MatchNodeGroup(node *corev1.Node) (NodeGroup, error) {
 		if !utils.IsSubSlices(genTaintKeys(node.Spec.Taints), genTaintKeys(ng.NodeTemplate.Taints)) {
 			continue
 		}
-		matchNg = append(matchNg, *ng)
+		matchedNg = append(matchedNg, *ng)
 	}
 
-	switch len(matchNg) {
+	switch len(matchedNg) {
 	case 0:
+		delete(ngs.matchedMultipleNodeGroup, node.Name)
 		return *ngs.cache.find(DefaultNodeGroup), nil
 	case 1:
-		return matchNg[0], nil
+		delete(ngs.matchedMultipleNodeGroup, node.Name)
+		return matchedNg[0], nil
 	default:
 		var ns []string
-		for _, v := range matchNg {
+		for _, v := range matchedNg {
 			ns = append(ns, v.Id)
 		}
-		return matchNg[0], fmt.Errorf("node(%s) belongs to multiple nodegroups %v, %w", node.Name, ns, MatchedMultipleErr)
+		ngs.matchedMultipleNodeGroup[node.Name] = ns
+		klog.Errorf("node(%s) matched multiple nodegroup %v", node.Name, ns)
+		return matchedNg[0], MatchedMultipleErr
 	}
 }
 
@@ -384,7 +390,7 @@ func (ngs *NodeGroups) FindNodeGroupByNodeName(nodeName string) (NodeGroup, erro
 		for _, v := range matchedNg {
 			ns = append(ns, v.Id)
 		}
-		klog.Errorf("node(%s) belongs to multiple nodegroups %v, %s", nodeName, ns, MatchedMultipleErr)
+		klog.Errorf("node(%s) matched multiple nodegroup %v", nodeName, ns)
 		return matchedNg[0], MatchedMultipleErr
 	}
 }
@@ -488,6 +494,13 @@ func (ngs *NodeGroups) RefreshTargetSize() {
 		}
 		ng.TargetSize = size
 	}
+}
+
+func (ngs *NodeGroups) GetMatchedMultipleNodeGroup() map[string][]string {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	return ngs.matchedMultipleNodeGroup
 }
 
 // UpdateNodeInNodeGroup 需要考虑：

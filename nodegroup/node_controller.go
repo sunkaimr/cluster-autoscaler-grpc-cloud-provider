@@ -143,13 +143,12 @@ func (c *Controller) run(workers int, stopCh <-chan struct{}) error {
 	}
 	klog.V(0).Infof("started %d node controller workers", workers)
 
-	time.Sleep(time.Second)
 	for {
+		time.Sleep(time.Second)
 		if c.workQueue.Len() == 0 {
 			klog.V(0).Info("workQueue handle finished")
 			break
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
 
 	return nil

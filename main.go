@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/metrics"
 	"net"
 	"os"
 	"os/signal"
@@ -24,6 +25,8 @@ import (
 var (
 	// flags needed by the external grpc provider service
 	address           = flag.String("address", ":8086", "The address to expose the grpc service.")
+	metricsAddress    = flag.String("metrics-address", ":8087", "The address to listen on for Prometheus scrapes.")
+	metricsPath       = flag.String("metrics-path", "/metrics", "The path to publish Prometheus metrics to.")
 	cloudProviderFlag = flag.String("cloud-provider", cloudprovider.ExternalGrpcProviderName, "cloud provider type, only support 'externalgrpc'")
 	cloudConfig       = flag.String("cloud-config", "cloud-config.cfg", "The path to the cloud provider configuration file.")
 	kubeConfig        = flag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
@@ -76,6 +79,8 @@ func main() {
 		klog.Fatalf("run NodeGroup failed: %s", err)
 	}
 
+	metrics.Init(*metricsAddress, *metricsPath)
+
 	lis, err := net.Listen("tcp", *address)
 	if err != nil {
 		klog.Fatalf("failed to listen: %s", err)
@@ -83,7 +88,7 @@ func main() {
 
 	// grpc serve
 	protos.RegisterCloudProviderServer(grpcServer, srv)
-	klog.V(1).Infof("Server ready at: %s\n", *address)
+	klog.V(1).Infof("grpc server ready at: %s\n", *address)
 	if err := grpcServer.Serve(lis); err != nil {
 		klog.Fatalf("failed to serve: %v", err)
 	}
