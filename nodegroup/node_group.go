@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"math/rand"
 	"os"
 	"path"
@@ -29,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/deletetaint"
 	"k8s.io/klog/v2"
 )
 
@@ -57,6 +58,8 @@ var KubeReservedTaints = []string{
 	corev1.TaintNodeNetworkUnavailable,
 	corev1.TaintNodePIDPressure,
 	corev1.TaintNodeOutOfService,
+	deletetaint.ToBeDeletedTaint,
+	deletetaint.DeletionCandidateTaint,
 }
 
 var (
@@ -881,7 +884,7 @@ func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
 		klog.V(6).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
 		return
 	} else {
-		klog.V(3).Infof("configmap(%s/%s) md5 changed", namespace, configmap)
+		klog.V(5).Infof("configmap(%s/%s) md5 changed", namespace, configmap)
 	}
 
 	if configMap.ObjectMeta.Annotations == nil {

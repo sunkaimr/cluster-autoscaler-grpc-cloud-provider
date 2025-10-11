@@ -84,6 +84,7 @@ func (_ *Wrapper) NodeGroupForNode(_ context.Context, req *protos.NodeGroupForNo
 
 	ng, err := nodegroup.GetNodeGroups().FindNodeGroupByNodeName(node.Name)
 	if err != nil {
+		klog.Warningf("get node(%s) nodegroup failed, %s", node.Name, err)
 		return &protos.NodeGroupForNodeResponse{}, err
 	}
 
@@ -276,6 +277,7 @@ func (_ *Wrapper) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.NodeG
 	id := req.GetId()
 	ng, err := nodegroup.GetNodeGroups().FindNodeGroupById(id)
 	if err != nil {
+		klog.Warningf("find nodegroup(%s) failed, %s", id, err)
 		return &protos.NodeGroupTemplateNodeInfoResponse{}, err
 	}
 
@@ -296,6 +298,7 @@ func (_ *Wrapper) NodeGroupGetOptions(_ context.Context, req *protos.NodeGroupAu
 	id := req.GetId()
 	ng, err := nodegroup.GetNodeGroups().FindNodeGroupById(id)
 	if err != nil {
+		klog.Warningf("find nodegroup(%s) failed, %s", id, err)
 		return &protos.NodeGroupAutoscalingOptionsResponse{
 			NodeGroupAutoscalingOptions: pbDefaults,
 		}, err
