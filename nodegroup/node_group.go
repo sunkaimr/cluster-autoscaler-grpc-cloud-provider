@@ -6,7 +6,6 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
-	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"math/rand"
 	"os"
 	"path"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 
 	"github.com/sethvargo/go-retry"
 	"github.com/spf13/viper"
@@ -1157,7 +1158,7 @@ func (ngs *NodeGroups) FilterInstanceByStages(stages ...Stage) []*Instance {
 	return filterInstance
 }
 
-func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...Status) []*Instance {
+func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, status ...Status) []*Instance {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -1167,8 +1168,8 @@ func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, results ...St
 			if ins.Stage != stage {
 				continue
 			}
-			for _, result := range results {
-				if ins.Status == result {
+			for _, s := range status {
+				if ins.Status == s {
 					incCopy := *ins
 					filterInstance = append(filterInstance, &incCopy)
 				}
@@ -1284,7 +1285,7 @@ func (ngs *NodeGroups) runInstancesController(ctx context.Context) {
 func routeInstanceByStatus(ngs *NodeGroups, key Stage, status ...Stage) {
 	for _, in := range ngs.FilterInstanceByStages(status...) {
 		if v, ok := ngs.instanceQueue[key]; ok {
-			if b := v.Add(in, true); b {
+			if b := v.Add(in.ID, true); b {
 				klog.V(9).Infof("add %s to instanceQueue(%s)", in.ID, key)
 			} else {
 				klog.V(9).Infof("add %s to instanceQueue(%s) but it existed", in.ID, key)
@@ -1320,70 +1321,71 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 				continue
 			}
 
-			inss := removeInstancesFromQueue(ngs.instanceQueue[key], parallelism-len(inProcessIns))
-			if len(inss) == 0 {
+			insIds := removeInstancesFromQueue(ngs.instanceQueue[key], parallelism-len(inProcessIns))
+			if len(insIds) == 0 {
 				continue
 			}
 
-			handInss := make([]*Instance, 0, len(inss))
-			for _, ins := range inss {
+			for _, insId := range insIds {
+				ins := GetNodeGroups().FindInstance(insId)
+				if ins == nil {
+					continue
+				}
+
 				if ins.Status == "" || ins.Status == StatusInit {
 					ins.Status = StatusInProcess
-					handInss = append(handInss, ins)
-				}
-			}
-			ngs.UpdateInstances(handInss...)
+					ngs.UpdateInstances(ins)
 
-			for _, ins := range handInss {
-				go handle(ctx, ngs, ins)
+					go handle(ctx, ngs, ins)
+				}
 			}
 		}
 	}
 }
 
 // 在t时间内从队列中获取size个元素(不会从队列中删除)
-func dumpInstancesFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
-	if q == nil {
-		return nil
-	}
-
-	if maxSize <= 0 {
-		return nil
-	}
-
-	t1 := time.Tick(t)
-	t2 := time.Tick(t / time.Duration(maxSize) / 10)
-exit:
-	for {
-		select {
-		// 超时退出
-		case <-t1:
-			if q.Length() < maxSize {
-				maxSize = q.Length()
-			}
-			break exit
-			// 满足maxSize退出
-		case <-t2:
-			if q.Length() >= maxSize {
-				break exit
-			}
-		}
-	}
-
-	ins := make([]T, 0, maxSize)
-	queueLen := q.Length()
-
-	for i := queueLen - 1; i >= queueLen-maxSize; i-- {
-		elem := q.Get(i)
-		if v, ok := elem.(T); ok {
-			ins = append(ins, v)
-		}
-	}
-	return ins
-}
+//func dumpInstancesFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
+//	if q == nil {
+//		return nil
+//	}
+//
+//	if maxSize <= 0 {
+//		return nil
+//	}
+//
+//	t1 := time.Tick(t)
+//	t2 := time.Tick(t / time.Duration(maxSize) / 10)
+//exit:
+//	for {
+//		select {
+//		// 超时退出
+//		case <-t1:
+//			if q.Length() < maxSize {
+//				maxSize = q.Length()
+//			}
+//			break exit
+//			// 满足maxSize退出
+//		case <-t2:
+//			if q.Length() >= maxSize {
+//				break exit
+//			}
+//		}
+//	}
+//
+//	ins := make([]T, 0, maxSize)
+//	queueLen := q.Length()
+//
+//	for i := queueLen - 1; i >= queueLen-maxSize; i-- {
+//		elem := q.Get(i)
+//		if v, ok := elem.(T); ok {
+//			ins = append(ins, v)
+//		}
+//	}
+//	return ins
+//}
 
 // 从队列尾部删除count个元素
-func removeInstancesFromQueue[T *Instance](q *queue.Queue, count int) (ins []T) {
+func removeInstancesFromQueue[T string](q *queue.Queue, count int) (ins []T) {
 	if q == nil {
 		return nil
 	}
@@ -1415,9 +1417,18 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 			klog.V(1).Infof("shutdown syncInstanceStatus")
 			return
 		case <-tick.C:
-			instances := removeInstancesFromQueue(ngs.instanceQueue[StageRunning], 20)
-			if len(instances) == 0 {
+			insIds := removeInstancesFromQueue(ngs.instanceQueue[StageRunning], 20)
+			if len(insIds) == 0 {
 				continue
+			}
+
+			instances := make([]*Instance, 0, len(insIds))
+			for _, insId := range insIds {
+				ins := GetNodeGroups().FindInstance(insId)
+				if ins == nil {
+					continue
+				}
+				instances = append(instances, ins)
 			}
 
 			classifiedIns := pcommon.ClassifiedInstancesByProviderID(instances)
@@ -1806,9 +1817,18 @@ func removeDeletedInstances(ctx context.Context, ngs *NodeGroups) {
 			klog.V(1).Infof("shutdown removeDeletedInstances")
 			return
 		case <-tick.C:
-			instances := removeInstancesFromQueue(ngs.instanceQueue[StageDeleted], 10)
-			if len(instances) == 0 {
+			insIds := removeInstancesFromQueue(ngs.instanceQueue[StageDeleted], 10)
+			if len(insIds) == 0 {
 				continue
+			}
+
+			instances := make([]*Instance, 0, len(insIds))
+			for _, insId := range insIds {
+				ins := GetNodeGroups().FindInstance(insId)
+				if ins == nil {
+					continue
+				}
+				instances = append(instances, ins)
 			}
 
 			for _, ins := range instances {
