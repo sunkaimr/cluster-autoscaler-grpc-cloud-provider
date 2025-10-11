@@ -78,7 +78,7 @@ spec:
         app: cluster-autoscaler-grpc-cloud-provider
       annotations:
         prometheus.io/scrape: 'true'
-        prometheus.io/port: '8085'
+        prometheus.io/port: '8087'
     spec:
       serviceAccountName: cluster-autoscaler-grpc-cloud-provider
       containers:

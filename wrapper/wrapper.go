@@ -19,7 +19,6 @@ package wrapper
 import (
 	"context"
 	"fmt"
-
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -82,10 +81,22 @@ func (_ *Wrapper) NodeGroupForNode(_ context.Context, req *protos.NodeGroupForNo
 		return nil, fmt.Errorf("request fields were nil")
 	}
 
-	ng, err := nodegroup.GetNodeGroups().FindNodeGroupByNodeName(node.Name)
-	if err != nil {
-		klog.Warningf("get node(%s) nodegroup failed, %s", node.Name, err)
-		return &protos.NodeGroupForNodeResponse{}, err
+	var ng nodegroup.NodeGroup
+	var err error
+
+	// 当instance刚创建好还有IP因此nodeName为空，此时node.Name和node.ProviderID相同
+	if node.Name != node.ProviderID {
+		ng, err = nodegroup.GetNodeGroups().FindNodeGroupByNodeName(node.Name)
+		if err != nil {
+			klog.Warningf("get node(%s) nodegroup failed, %s", node.Name, err)
+			return &protos.NodeGroupForNodeResponse{}, err
+		}
+	} else {
+		ng, err = nodegroup.GetNodeGroups().FindNodeGroupByProviderID(node.ProviderID)
+		if err != nil {
+			klog.Warningf("get node(%s) nodegroup failed, %s", node.ProviderID, err)
+			return &protos.NodeGroupForNodeResponse{}, err
+		}
 	}
 
 	return &protos.NodeGroupForNodeResponse{NodeGroup: pbNodeGroup(&ng)}, nil

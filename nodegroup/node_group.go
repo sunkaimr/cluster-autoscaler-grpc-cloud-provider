@@ -370,6 +370,34 @@ func (ngs *NodeGroups) MatchNodeGroup(node *corev1.Node) (NodeGroup, error) {
 	}
 }
 
+func (ngs *NodeGroups) FindNodeGroupByProviderID(providerId string) (NodeGroup, error) {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	var matchedNg []NodeGroup
+	for _, ng := range ngs.cache {
+		for _, v := range ng.Instances {
+			if v.ProviderID == providerId {
+				matchedNg = append(matchedNg, *ng)
+			}
+		}
+	}
+
+	switch len(matchedNg) {
+	case 0:
+		return NodeGroup{}, NotFoundErr
+	case 1:
+		return matchedNg[0], nil
+	default:
+		var ns []string
+		for _, v := range matchedNg {
+			ns = append(ns, v.Id)
+		}
+		klog.Errorf("node(%s) matched multiple nodegroup %v", providerId, ns)
+		return matchedNg[0], MatchedMultipleErr
+	}
+}
+
 func (ngs *NodeGroups) FindNodeGroupByNodeName(nodeName string) (NodeGroup, error) {
 	ngs.Lock()
 	defer ngs.Unlock()
