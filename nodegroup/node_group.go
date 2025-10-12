@@ -534,7 +534,7 @@ func (ngs *NodeGroups) RefreshTargetSize() {
 	for _, ng := range ngs.cache {
 		size := 0
 		for _, ins := range ng.Instances {
-			if ins.Stage == StageDeleted {
+			if ins.Stage == StagePendingDeletion || ins.Stage == StageDeleting || ins.Stage == StageDeleted {
 				continue
 			}
 			size++
@@ -691,8 +691,8 @@ func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) er
 			break
 		}
 
-		if ins.Stage == StageDeleted {
-			klog.Warningf("instance(%s) status is Deleted", ins.ID)
+		if ins.Stage == StagePendingDeletion || ins.Stage == StageDeleting || ins.Stage == StageDeleted {
+			klog.Warningf("instance(%s) status is %s", ins.ID, ins.Stage)
 			continue
 		}
 
@@ -1321,7 +1321,7 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 				continue
 			}
 
-			insIds := removeInstancesFromQueue(ngs.instanceQueue[key], parallelism-len(inProcessIns))
+			insIds := dumpInstancesFromQueue(ngs.instanceQueue[key], parallelism-len(inProcessIns))
 			if len(insIds) == 0 {
 				continue
 			}
@@ -1339,50 +1339,37 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 					go handle(ctx, ngs, ins)
 				}
 			}
+
+			removeInstancesFromQueue(ngs.instanceQueue[key], len(insIds))
 		}
 	}
 }
 
-// 在t时间内从队列中获取size个元素(不会从队列中删除)
-//func dumpInstancesFromQueue[T *Instance](q *queue.Queue, maxSize int, t time.Duration) []T {
-//	if q == nil {
-//		return nil
-//	}
-//
-//	if maxSize <= 0 {
-//		return nil
-//	}
-//
-//	t1 := time.Tick(t)
-//	t2 := time.Tick(t / time.Duration(maxSize) / 10)
-//exit:
-//	for {
-//		select {
-//		// 超时退出
-//		case <-t1:
-//			if q.Length() < maxSize {
-//				maxSize = q.Length()
-//			}
-//			break exit
-//			// 满足maxSize退出
-//		case <-t2:
-//			if q.Length() >= maxSize {
-//				break exit
-//			}
-//		}
-//	}
-//
-//	ins := make([]T, 0, maxSize)
-//	queueLen := q.Length()
-//
-//	for i := queueLen - 1; i >= queueLen-maxSize; i-- {
-//		elem := q.Get(i)
-//		if v, ok := elem.(T); ok {
-//			ins = append(ins, v)
-//		}
-//	}
-//	return ins
-//}
+// 从队列中获取size个元素(不会从队列中删除)
+func dumpInstancesFromQueue[T string](q *queue.Queue, maxSize int) []T {
+	if q == nil {
+		return nil
+	}
+
+	queueLen := q.Length()
+	if maxSize <= 0 || queueLen <= 0 {
+		return nil
+	}
+
+	if queueLen < maxSize {
+		maxSize = queueLen
+	}
+
+	ins := make([]T, 0, maxSize)
+	for i := 0; i < maxSize; i++ {
+		elem := q.Get(i)
+		if v, ok := elem.(T); ok {
+			ins = append(ins, v)
+		}
+	}
+
+	return ins
+}
 
 // 从队列尾部删除count个元素
 func removeInstancesFromQueue[T string](q *queue.Queue, count int) (ins []T) {
@@ -1438,10 +1425,10 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 					continue
 				}
 
-				insIds := make([]string, 0, len(inss))
+				instancesId := make([]string, 0, len(inss))
 				for _, ins := range inss {
 					_, _, _, id, _ := pcommon.ExtractProviderID(ins.ProviderID)
-					insIds = append(insIds, id)
+					instancesId = append(instancesId, id)
 				}
 
 				cp, err := provider.NewCloudprovider(inss[0].ProviderID, GetNodeGroups().CloudProviderOption())
@@ -1451,7 +1438,7 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 				}
 
 				// 调用云厂商接口获取instance状态
-				res, err := cp.InstancesStatus(ctx, insIds...)
+				res, err := cp.InstancesStatus(ctx, instancesId...)
 				if err != nil {
 					klog.Errorf("sync instances status failed, %s", err)
 				}
@@ -1480,14 +1467,17 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 						ins.Status = StatusUnknown
 						ins.Error = "unknown status"
 					}
-					klog.V(6).Infof("update instance(%s) staus is %s", ins.ID, ins.Status)
-				}
 
-				// 更新Instance的状态
-				ngs.UpdateInstancesStatus(inss...)
+					// 查询需要一段时间防止在次时间内实例改变为其他状态
+					if newIns := GetNodeGroups().FindInstance(ins.ID); newIns == nil || newIns.Stage != StageRunning {
+						continue
+					}
+
+					klog.V(6).Infof("update instance(%s) staus is %s/%s", ins.ID, ins.Stage, ins.Status)
+					ngs.UpdateInstancesStatus(ins)
+				}
 				klog.V(5).Infof("updated %d instances status by cloudprovider %s", len(inss), k)
 			}
-
 		}
 	}
 }
