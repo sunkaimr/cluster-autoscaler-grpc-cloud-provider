@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-VER ?= v0.0.0
+VER ?= v1.0.0
 # application name
 APP ?= cluster-autoscaler-grpc-cloud-provider
 
@@ -53,11 +53,12 @@ vet: ## Run go vet against code.
 
 .PHONY: build
 build: fmt ## Build binary.
-	go build -ldflags "-X 'github.com/sunkaimr/cluster-autoscaler-grpc-provider/main.version=${VER}' \
-                       -X 'github.com/sunkaimr/cluster-autoscaler-grpc-provider/main.goVersion=$$(go version)' \
-                       -X 'github.com/sunkaimr/cluster-autoscaler-grpc-provider/main.gitCommit=$$(git show -s --format=%H)' \
-                       -X 'github.com/sunkaimr/cluster-autoscaler-grpc-provider/main.buildTime=$$(date +'%Y-%m-%d %H:%M:%S')'" \
-                       -o ${APP} main.go
+	go build -ldflags "\
+	   -X 'main.version=${VER}' \
+	   -X 'main.goVersion=$$(go version)' \
+	   -X 'main.gitCommit=$$(git show -s --format=%H)' \
+	   -X 'main.buildTime=$$(date +'%Y-%m-%d %H:%M:%S')'" \
+	   -o ${APP} main.go
 
 .PHONY: run
 run: fmt vet ## Run the application on your host.
