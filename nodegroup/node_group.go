@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -849,6 +850,7 @@ func (ngs *NodeGroups) Yaml() (string, error) {
 
 	var ngc NodeGroupsConfig
 	for _, ng := range ngs.cache {
+		sort.Sort(&(*ng).Instances)
 		ngc.NodeGroups = append(ngc.NodeGroups, *ng)
 	}
 	ngc.CloudProviderOption = ngs.cloudProviderOption
@@ -1334,7 +1336,7 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 
 				if ins.Status == "" || ins.Status == StatusInit {
 					ins.Status = StatusInProcess
-					ngs.UpdateInstances(ins)
+					ngs.UpdateInstancesStatus(ins)
 
 					go handle(ctx, ngs, ins)
 				}
@@ -1517,7 +1519,7 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("find nodegroup by instance ID failed, %s", err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1527,7 +1529,7 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("nodegroup(%s).InstanceParameter[%s] not exist", ng.Id, ng.InstanceParameter)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1537,7 +1539,7 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("NewCloudprovider failed, %s", err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1551,7 +1553,7 @@ func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("create instance(%s) failed, %s", ins.ID, err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 	} else {
 		providerName, account, region, _, _ := pcommon.ExtractProviderID(insParam.ProviderIdTemplate)
@@ -1583,7 +1585,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1594,7 +1596,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("wait instance(%s) created failed, %s", ins.ID, err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1602,7 +1604,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	if status != pcommon.InstanceStatusRunning {
 		ins.Status = StatusInit
 		ins.Error = ""
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		return
 	}
 
@@ -1611,7 +1613,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("wait instance(%s) ip failed, %s", ins.ID, err)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1620,7 +1622,7 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		err = fmt.Errorf("wait instance(%s) ip failed, ip is null", ins.ID)
 		ins.Status = StatusFailed
 		ins.Error = err.Error()
-		ngs.UpdateInstances(ins)
+		ngs.UpdateInstancesStatus(ins)
 		klog.Error(err)
 		return
 	}
@@ -1747,8 +1749,7 @@ func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 		ins.Error = ""
 		klog.V(1).Infof("exec %s for intance(%s) success, cost:%v", BeforeDeleteScript, ins.ID, time.Since(start))
 	}
-	// 更新Instance信息
-	ngs.UpdateInstances(ins)
+	ngs.UpdateInstancesStatus(ins)
 }
 
 // deleteInstance 调用云厂商接口删除instance
@@ -1792,7 +1793,7 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 			klog.V(1).Infof("delete intance(%s) from kubernets success", ins.ID)
 		}
 	}
-	ngs.UpdateInstances(ins)
+	ngs.UpdateInstancesStatus(ins)
 }
 
 // removeDeletedInstances 移除之前已删除的instance

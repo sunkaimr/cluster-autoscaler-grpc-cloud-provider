@@ -113,3 +113,43 @@ func (c *InstanceList) DecreasePending(num int) int /*实际减少的数量*/ {
 	*c = newIns
 	return len(deleteIdx)
 }
+
+func (c *InstanceList) Len() int {
+	return len(*c)
+}
+
+func (c *InstanceList) Less(i, j int) bool {
+	scoringFn := func(i *Instance) int {
+		stageScoreMap := map[Stage]int{
+			StageCreating: 10,
+			StageCreated:  20,
+			StageJoined:   30,
+			StageRunning:  40,
+			StagePending:  50,
+			StageDeleting: 60,
+			StageDeleted:  70,
+		}
+		statusScoreMap := map[Status]int{
+			StatusInit:      1,
+			StatusInProcess: 2,
+			StatusSuccess:   3,
+			StatusFailed:    4,
+			StatusUnknown:   5,
+		}
+		return stageScoreMap[i.Stage] + statusScoreMap[i.Status]
+	}
+
+	iIns, jIns := (*c)[i], (*c)[j]
+	iScore, jScore := scoringFn(iIns), scoringFn(jIns)
+	if iScore < jScore {
+		return true
+	} else if iScore == jScore {
+		if iIns.IP < jIns.IP {
+			return true
+		}
+	}
+	return false
+}
+func (c *InstanceList) Swap(i, j int) {
+	(*c)[i], (*c)[j] = (*c)[j], (*c)[i]
+}
