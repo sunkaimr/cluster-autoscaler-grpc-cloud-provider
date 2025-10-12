@@ -109,7 +109,7 @@ spec:
             - --nodegroup-config=/opt/nodegroup-config.yaml
             - --hooks-path=/opt/hooks
             - --create-parallelism=3
-            - --delete-parallelism=3
+            - --delete-parallelism=1
             - --v=5
           volumeMounts:
             - name: config

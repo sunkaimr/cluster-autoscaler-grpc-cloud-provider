@@ -1330,7 +1330,7 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 
 			for _, insId := range insIds {
 				ins := GetNodeGroups().FindInstance(insId)
-				if ins == nil {
+				if ins == nil || ins.Stage != key {
 					continue
 				}
 
@@ -1470,7 +1470,7 @@ func syncInstanceStatus(ctx context.Context, ngs *NodeGroups) {
 						ins.Error = "unknown status"
 					}
 
-					// 查询需要一段时间防止在次时间内实例改变为其他状态
+					// 查询需要一段时间防止在此时间内实例改变为其他状态
 					if newIns := GetNodeGroups().FindInstance(ins.ID); newIns == nil || newIns.Stage != StageRunning {
 						continue
 					}
@@ -1500,18 +1500,28 @@ func filterSyncInstanceStatus(ngs *NodeGroups, inss []*Instance) []*Instance {
 	return filterIns
 }
 
+// 查询最instance的最新状态以确认是否可以进行接下来的动作
+func handleConfirm(ngs *NodeGroups, ins *Instance, stage Stage, status Status) (*Instance, error) {
+	if v := ngs.FindInstance(ins.ID); v == nil {
+		return ins, fmt.Errorf("instance(%s) not found", ins.ID)
+	} else if v.Stage != stage {
+		return ins, fmt.Errorf(" instance(%s) stage changed from %s to %s", ins.ID, stage, v.Stage)
+	} else if v.Status != status {
+		return ins, fmt.Errorf("instance(%s) status changed from %s to %s", ins.ID, status, v.Status)
+	} else {
+		return v, nil
+	}
+}
+
 // 调用云厂商接口创建instance
 func createInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StagePending, StatusInProcess); err != nil {
+		klog.Warningf("confirm createInstance not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
 	ng, err := GetNodeGroups().FindNodeGroupByInstanceID(ins.ID)
@@ -1571,13 +1581,10 @@ func waitInstanceCreated(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StageCreating, StatusInProcess); err != nil {
+		klog.Warningf("confirm waitInstanceCreated not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
 	cp, err := provider.NewCloudprovider(ins.ProviderID, GetNodeGroups().CloudProviderOption())
@@ -1650,18 +1657,15 @@ func execAfterCreatedHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StageCreated, StatusInProcess); err != nil {
+		klog.Warningf("confirm execAfterCreatedHook not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
 	start := time.Now()
 	klog.V(1).Infof("exec %s for intance(%s)...", AfterCreatedScript, ins.ID)
-	err := execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
+	err = execHookScript(ctx, ngs, ins, AfterCreatedScript, false)
 	if err != nil {
 		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
 		ins.Status = StatusFailed
@@ -1683,16 +1687,13 @@ func waitJoined(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StageJoined, StatusInProcess); err != nil {
+		klog.Warningf("confirm waitJoined not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
-	_, err := NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
+	_, err = NewKubeClient().CoreV1().Nodes().Get(ctx, ins.Name, metav1.GetOptions{})
 	if err != nil {
 		ins.Status = StatusInProcess
 		ins.Error = err.Error()
@@ -1726,18 +1727,15 @@ func execBeforeDeleteHook(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StagePendingDeletion, StatusInProcess); err != nil {
+		klog.Warningf("confirm execBeforeDeleteHook not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
 	start := time.Now()
 	klog.V(1).Infof("exec %s for intance(%s)...", BeforeDeleteScript, ins.ID)
-	err := execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
+	err = execHookScript(ctx, ngs, ins, BeforeDeleteScript, false)
 	if err != nil {
 		err = fmt.Errorf("exec intance(%s) execHookScript failed, cost:%v, %s", ins.ID, time.Since(start), err)
 		ins.Status = StatusFailed
@@ -1757,19 +1755,16 @@ func deleteInstance(ctx context.Context, ngs *NodeGroups, ins *Instance) {
 	common.ContextWaitGroupAdd(ctx, 1)
 	defer common.ContextWaitGroupDone(ctx)
 
-	if v := ngs.FindInstance(ins.ID); v == nil {
-		klog.Errorf("instance(%s) not found", ins.ID)
+	var err error
+	if ins, err = handleConfirm(ngs, ins, StageDeleting, StatusInProcess); err != nil {
+		klog.Warningf("confirm deleteInstance not paas, %s", err)
 		return
-	} else if v.Status != StatusInProcess {
-		return
-	} else {
-		ins = v
 	}
 
 	klog.V(1).Infof("delete intance(%s)...", ins.ID)
 
 	ctx1, cancel := context.WithTimeout(context.TODO(), time.Second*60)
-	err := callDeleteInstance(ctx1, ngs, ins)
+	err = callDeleteInstance(ctx1, ngs, ins)
 	defer cancel()
 	if err != nil {
 		err = fmt.Errorf("delete intance(%s) failed, %s", ins.ID, err)

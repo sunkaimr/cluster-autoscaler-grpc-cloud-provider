@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/metrics"
 	"net"
 	"os"
 	"os/signal"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/metrics"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/wrapper"
 	"google.golang.org/grpc"

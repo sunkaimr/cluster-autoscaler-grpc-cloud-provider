@@ -2,14 +2,15 @@ package metrics
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
 	"k8s.io/klog/v2"
-	"net/http"
-	"strings"
-	"time"
 )
 
 const (
@@ -110,7 +111,7 @@ func refresh() {
 	tick := time.Tick(time.Second * 5)
 	for {
 		start := time.Now()
-		klog.V(5).Infof("refresh metrics...")
+		klog.V(6).Infof("refresh metrics...")
 
 		NodegroupMinSize.Reset()
 		NodegroupMaxSize.Reset()
@@ -144,7 +145,7 @@ func refresh() {
 			MatchedMultipleNodegroup.WithLabelValues(node, strings.Join(ngs, ",")).Set(float64(len(ngs)))
 		}
 
-		klog.V(5).Infof("finish refresh metrics, cost: %v", time.Now().Sub(start))
+		klog.V(6).Infof("finish refresh metrics, cost: %v", time.Now().Sub(start))
 		<-tick
 	}
 }
