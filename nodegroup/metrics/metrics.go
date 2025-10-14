@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	namespace = "ca_grpc_provider"
+	namespace = "ca_grpc_cloud_provider"
 )
 
 var (

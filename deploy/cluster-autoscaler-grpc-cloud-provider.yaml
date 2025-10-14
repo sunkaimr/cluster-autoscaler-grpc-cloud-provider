@@ -29,7 +29,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "watch"]
   - apiGroups: ["coordination.k8s.io"]
-    resourceNames: ["cluster-autoscaler"]
+    resourceNames: ["cluster-autoscaler-grpc-cloud-provider"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
 ---
