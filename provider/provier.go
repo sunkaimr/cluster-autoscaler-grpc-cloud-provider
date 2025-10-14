@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/providers/tencentcloud"
+	. "github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/provider/common"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/provider/providers/tencentcloud"
 )
 
 var cloudproviderClientCache = make(map[string]Cloudprovider, 10)

@@ -3,7 +3,7 @@ package instance
 import (
 	"time"
 
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/utils"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/pkg/utils"
 )
 
 type Stage string

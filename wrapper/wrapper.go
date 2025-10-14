@@ -19,8 +19,8 @@ package wrapper
 import (
 	"context"
 	"fmt"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/externalgrpc/protos"

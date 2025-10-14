@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
+	. "github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
 	"k8s.io/klog/v2"
 )
 

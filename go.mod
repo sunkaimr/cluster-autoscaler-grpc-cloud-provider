@@ -1,4 +1,4 @@
-module github.com/sunkaimr/cluster-autoscaler-grpc-provider
+module github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider
 
 go 1.19
 

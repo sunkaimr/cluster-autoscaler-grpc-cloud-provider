@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
 
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

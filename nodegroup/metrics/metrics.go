@@ -8,8 +8,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/instance"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
 	"k8s.io/klog/v2"
 )
 

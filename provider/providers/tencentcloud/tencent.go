@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	. "github.com/sunkaimr/cluster-autoscaler-grpc-provider/provider/common"
+	. "github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/provider/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"

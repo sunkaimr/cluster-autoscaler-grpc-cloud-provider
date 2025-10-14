@@ -9,10 +9,10 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/nodegroup/metrics"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/pkg/common"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-provider/wrapper"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/metrics"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/pkg/common"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/wrapper"
 	"google.golang.org/grpc"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	cloudBuilder "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/builder"
@@ -34,7 +34,7 @@ var (
 	cm                = flag.String("nodegroup-status-cm", "nodegroup-status", "the config-map name of save nodegroup status")
 	nodeGroupConfig   = flag.String("nodegroup-config", "nodegroup-config.yaml", "The path to the nodegroup configuration file.")
 	hooksPath         = flag.String("hooks-path", "./hooks", "The path to the hooks, should contains 2 hooks: after_created_hook.sh, before_delete_hook.sh")
-	createParallelism = flag.Int("create-parallelism", 1, "Maximum number of concurrent create instance allowed. Limits how many instances can be created simultaneously.")
+	createParallelism = flag.Int("create-parallelism", 5, "Maximum number of concurrent create instance allowed. Limits how many instances can be created simultaneously.")
 	deleteParallelism = flag.Int("delete-parallelism", 1, "Maximum number of concurrent delete instance allowed. Limits how many instances can be deleted at the same time.")
 )
 
@@ -49,7 +49,7 @@ var grpcServer *grpc.Server
 
 func main() {
 	klog.InitFlags(nil)
-	klog.Infof("version: %s ,gitCommit: %s, buildTime :%s, goVersion :%s", version, gitCommit, buildTime, goVersion)
+	klog.Infof("version: %s ,gitCommit: %s, buildTime: %s, goVersion: %s", version, gitCommit, buildTime, goVersion)
 	kubeFlag.InitFlags()
 
 	grpcServer = grpc.NewServer()
