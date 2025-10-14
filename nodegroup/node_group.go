@@ -106,7 +106,6 @@ type NodeGroups struct {
 }
 
 type nodeGroupsOps struct {
-	kubeConfig        string
 	configFile        string
 	nameSpace         string
 	statusConfigMap   string // "nodegroup-status"
@@ -210,13 +209,6 @@ func (ngs *NodeGroups) Run(ctx context.Context, ops ...func() error) error {
 func (ngs *NodeGroups) WithOpsConfigFile(f string) func() error {
 	return func() error {
 		ngs.ops.configFile = f
-		return nil
-	}
-}
-
-func (ngs *NodeGroups) WithOpsKubeConfig(f string) func() error {
-	return func() error {
-		ngs.ops.kubeConfig = f
 		return nil
 	}
 }

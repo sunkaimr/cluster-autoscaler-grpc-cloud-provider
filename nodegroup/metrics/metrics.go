@@ -80,7 +80,7 @@ var (
 	)
 )
 
-func Init(addr, path string) {
+func Server(addr, path string) {
 	customRegistry := prometheus.NewRegistry()
 
 	customRegistry.MustRegister(NodegroupMinSize)

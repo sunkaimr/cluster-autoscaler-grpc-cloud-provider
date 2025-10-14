@@ -37,6 +37,7 @@ type Controller struct {
 	workQueue workqueue.RateLimitingInterface
 }
 
+var KubeConfigFile string
 var kubeClient *kubernetes.Clientset
 
 func NewKubeClient() *kubernetes.Clientset {
@@ -44,13 +45,11 @@ func NewKubeClient() *kubernetes.Clientset {
 		return kubeClient
 	}
 
-	kubeconfig := GetNodeGroups().ops.kubeConfig
-
 	var err error
 	var cfg *rest.Config
-	if kubeconfig != "" {
+	if KubeConfigFile != "" {
 		// 如果在k8s集群外部使用需要通过k8s的config文件来创建client
-		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		cfg, err = clientcmd.BuildConfigFromFlags("", KubeConfigFile)
 		if err != nil {
 			klog.Exitf("Error building kubeconfig: %s", err.Error())
 		}
