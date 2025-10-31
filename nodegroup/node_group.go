@@ -649,8 +649,8 @@ func (ngs *NodeGroups) DeleteNode(nodeName string) {
 	}
 }
 
-// DeleteNodesInNodeGroup 收到CA的删除NodeGroup中node请求，将对应的Instance标记为Deleting状态
-func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) error {
+// DeleteNodesInNodeGroupByNodeName 收到CA的删除NodeGroup中node请求，将对应的Instance标记为Deleting状态
+func (ngs *NodeGroups) DeleteNodesInNodeGroupByNodeName(id string, nodeNames ...string) error {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -682,6 +682,57 @@ func (ngs *NodeGroups) DeleteNodesInNodeGroup(id string, nodeNames ...string) er
 
 		if deleted >= maxDeletedSize {
 			klog.Warningf("node(%s) not found in nodegroup(%s)", name, id)
+			break
+		}
+
+		if ins.Stage == StagePendingDeletion || ins.Stage == StageDeleting || ins.Stage == StageDeleted {
+			klog.Warningf("instance(%s) status is %s", ins.ID, ins.Stage)
+			continue
+		}
+
+		klog.V(0).Infof("nodegroup(%s) node(%s) is %s and marked %s", ng.Id, ins.Name, ins.Stage, StagePendingDeletion)
+		ins.Stage = StagePendingDeletion
+		ins.Status = StatusInit
+		ins.Error = ""
+		deleted++
+	}
+	ng.TargetSize -= deleted
+	return nil
+}
+
+// DeleteNodesInNodeGroupByProviderId 收到CA的删除NodeGroup中node请求，将对应的Instance标记为Deleting状态
+func (ngs *NodeGroups) DeleteNodesInNodeGroupByProviderId(id string, providerIds ...string) error {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	ng := ngs.cache.find(id)
+	if ng == nil {
+		return NotFoundErr
+	}
+
+	// 判断删除后的size是否小于MinSize
+	maxDeletedSize := len(providerIds)
+	if ng.TargetSize-len(providerIds) < ng.MinSize {
+		maxDeletedSize = ng.TargetSize - ng.MinSize
+		klog.Warningf("nodegroup(%s) delete instance reached MinSize(%d)", id, ng.MinSize)
+	}
+
+	if maxDeletedSize == 0 {
+		err := fmt.Errorf("nodegroup(%s) has reached MinSize(%d)", id, ng.MinSize)
+		klog.Error(err)
+		return err
+	}
+
+	deleted := 0
+	for _, providerId := range providerIds {
+		ins := ng.Instances.FindByProviderID(providerId)
+		if ins == nil {
+			klog.Warningf("node(%s) not found in nodegroup(%s)", providerId, id)
+			continue
+		}
+
+		if deleted >= maxDeletedSize {
+			klog.Warningf("node(%s) not found in nodegroup(%s)", providerId, id)
 			break
 		}
 

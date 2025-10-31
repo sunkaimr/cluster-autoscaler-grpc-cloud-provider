@@ -19,6 +19,7 @@ package wrapper
 import (
 	"context"
 	"fmt"
+
 	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,7 +85,7 @@ func (_ *Wrapper) NodeGroupForNode(_ context.Context, req *protos.NodeGroupForNo
 	var ng nodegroup.NodeGroup
 	var err error
 
-	// 当instance刚创建好还有IP因此nodeName为空，此时node.Name和node.ProviderID相同
+	// 当instance刚创建好还没有IP因此nodeName为空，此时node.Name和node.ProviderID相同
 	if node.Name != node.ProviderID {
 		ng, err = nodegroup.GetNodeGroups().FindNodeGroupByNodeName(node.Name)
 		if err != nil {
@@ -183,17 +184,27 @@ func (_ *Wrapper) NodeGroupDeleteNodes(_ context.Context, req *protos.NodeGroupD
 
 	id := req.GetId()
 
-	nodes := make([]string, 0, 10)
+	nodeName := make([]string, 0, 10)
 	for _, v := range req.GetNodes() {
-		nodes = append(nodes, v.Name)
+		nodeName = append(nodeName, v.Name)
 	}
 
-	klog.V(0).Infof("got NodeGroupDeleteNodes request: nodegroup(%s) request delete node: %v", id, nodes)
+	klog.V(0).Infof("got NodeGroupDeleteNodes request: nodegroup(%s) request delete node: %v", id, nodeName)
 
-	err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroup(id, nodes...)
-	if err != nil {
-		klog.Error(err)
-		return &protos.NodeGroupDeleteNodesResponse{}, err
+	for _, node := range req.GetNodes() {
+		if node.Name != node.ProviderID {
+			err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroupByNodeName(id, node.Name)
+			if err != nil {
+				klog.Error(err)
+				return &protos.NodeGroupDeleteNodesResponse{}, err
+			}
+		} else {
+			err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroupByProviderId(id, node.ProviderID)
+			if err != nil {
+				klog.Error(err)
+				return &protos.NodeGroupDeleteNodesResponse{}, err
+			}
+		}
 	}
 
 	return &protos.NodeGroupDeleteNodesResponse{}, nil

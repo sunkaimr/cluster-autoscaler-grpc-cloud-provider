@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-VER ?= v1.0.0
+VER ?= v1.0.1
 # application name
 APP ?= cluster-autoscaler-grpc-cloud-provider
 

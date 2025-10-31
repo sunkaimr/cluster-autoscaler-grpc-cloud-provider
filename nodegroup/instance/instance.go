@@ -87,6 +87,15 @@ func (c *InstanceList) FindByName(insName string) *Instance {
 	return nil
 }
 
+func (c *InstanceList) FindByProviderID(providerId string) *Instance {
+	for i, v := range *c {
+		if v.ProviderID != "" && v.ProviderID == providerId {
+			return (*c)[i]
+		}
+	}
+	return nil
+}
+
 // DecreasePending 减少N个Pending的instance
 func (c *InstanceList) DecreasePending(num int) int /*实际减少的数量*/ {
 	deleteIdx := make([]int, 0, len(*c))
