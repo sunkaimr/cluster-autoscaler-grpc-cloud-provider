@@ -104,7 +104,7 @@ func Server(addr, path string) {
 		}
 	}()
 
-	go refresh()
+	refresh()
 }
 
 func refresh() {

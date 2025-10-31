@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -856,6 +857,39 @@ func (ngs *NodeGroups) Yaml() (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func (ngs *NodeGroups) Json() (string, error) {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	var ngc NodeGroupsConfig
+	for _, ng := range ngs.cache {
+		sort.Sort(&(*ng).Instances)
+		ngc.NodeGroups = append(ngc.NodeGroups, *ng)
+	}
+	ngc.CloudProviderOption = ngs.cloudProviderOption
+
+	buf, err := json.Marshal(ngc)
+	if err != nil {
+		return "", err
+	}
+
+	return string(buf), nil
+}
+
+func (ngs *NodeGroups) Status() (NodeGroupsConfig, error) {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	var ngc NodeGroupsConfig
+	for _, ng := range ngs.cache {
+		sort.Sort(&(*ng).Instances)
+		ngc.NodeGroups = append(ngc.NodeGroups, *ng)
+	}
+	ngc.CloudProviderOption = ngs.cloudProviderOption
+
+	return ngc, nil
 }
 
 func WriteNodeGroupStatusToConfigMap(ctx context.Context) {

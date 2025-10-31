@@ -1,13 +1,10 @@
 package utils
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/rand"
-	"net/http"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -302,48 +299,6 @@ func TrimmingSQLConditionEnding(condition string) string {
 		}
 		condition = newCondition
 	}
-}
-
-func HttpDo(method, url string, headers, query map[string]string, b string) (*http.Response, []byte, error) {
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-		//Timeout: time.Second * 5,
-	}
-
-	if len(query) > 0 {
-		url += "?"
-		for k, v := range query {
-			url += fmt.Sprintf("%s=%s&", k, v)
-		}
-	}
-
-	req, err := http.NewRequest(method, url, strings.NewReader(b))
-	if err != nil {
-		return nil, nil, fmt.Errorf("new http client failed, err:%s", err)
-	}
-
-	req.Header.Set("Host", req.URL.Host)
-	req.Close = true
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("do http request failed, %s", err)
-	}
-
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp, nil, fmt.Errorf("read http response failed, err:%s", err)
-	}
-
-	return resp, body, nil
 }
 
 // HumanFormatTimeSeconds 将秒转换为便于人阅读的格式

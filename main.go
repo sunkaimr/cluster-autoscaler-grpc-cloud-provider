@@ -3,18 +3,20 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/spf13/pflag"
-	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/pkg/utils"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/component-base/config/options"
 	"net"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/spf13/pflag"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/pkg/utils"
+	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/server"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/component-base/config/options"
 
 	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup"
 	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/metrics"
@@ -166,7 +168,8 @@ func run() {
 		klog.Fatalf("run NodeGroup failed: %s", err)
 	}
 
-	metrics.Server(*metricsAddress, *metricsPath)
+	go server.HttpServer(ctx, *httpAddress)
+	go metrics.Server(*metricsAddress, *metricsPath)
 
 	lis, err := net.Listen("tcp", *grpcAddress)
 	if err != nil {
