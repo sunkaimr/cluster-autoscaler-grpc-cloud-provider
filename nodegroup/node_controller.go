@@ -3,11 +3,13 @@ package nodegroup
 import (
 	"context"
 	"fmt"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"math"
 	"reflect"
+	"strings"
 	"time"
+
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
@@ -262,6 +264,11 @@ func patchNodeNodeGroupTemplate(ctx context.Context, ngs *NodeGroups, ins *insta
 func DeleteNodeFromKubernetes(ctx context.Context, nodeName string) error {
 	err := NewKubeClient().CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			klog.Warningf("delete node form kubernetes but %s not found", nodeName)
+			return nil
+		}
+
 		return fmt.Errorf("delete node(%s) form kubernetes failed, %s", nodeName, err)
 	}
 	return nil
