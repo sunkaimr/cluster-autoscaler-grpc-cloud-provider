@@ -1,9 +1,9 @@
-FROM cowell-images.tencentcloudcr.com/cowellpi/ubuntu:22.04
+FROM ubuntu:22.04
 
 LABEL maintainer="sunkai"
 
 ENV TZ=Asia/Shanghai
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
+RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone  \
     && apt-get update \
     && apt-get install -y tzdata dumb-init bash curl \

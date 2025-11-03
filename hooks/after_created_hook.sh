@@ -38,10 +38,7 @@ set_hostname() {
 configure_hosts() {
     local hosts_lines=(
         "127.0.0.1 ${node_name}"
-        "10.2.13.10 kubernetes.default.svc"
-        "10.8.16.99 docker-repo.gaojihealth.cn"
-        "10.8.51.100 rancher.cowelltech.com"
-        "10.2.6.3 cowell-images.tencentcloudcr.com"
+        "1.2.3.4 kubernetes.default.svc"
     )
 
     for line in "${hosts_lines[@]}"; do
@@ -93,63 +90,12 @@ join_cluster() {
     # 加入集群
     log_info "Joining Kubernetes cluster"
     sudo kubeadm join kubernetes.default.svc:6443 \
-        --token 6qeuu1.o73nys8e313uabkb \
-        --discovery-token-ca-cert-hash sha256:f6123a5713c200d94053234a26c17389d8629d9f0b56a238514aa66eeb5aeeb4
+        --token 6qeuu1.yyyyyyy \
+        --discovery-token-ca-cert-hash sha256:xxxxxxxxx
 
     log_info "Successfully joined Kubernetes cluster"
 }
 
-add_host_to_cmdb(){
-    local bk_user="kubernetes"
-    local uni_resource_name="Saas-Node-$(echo $node_ip | tr \. \_)"
-    local bk_create=$(date "+%Y-%m-%d")
-    local bk_env="1"
-    local bk_func="kubernetes"
-
-    local request_data=$(cat << EOF
-          {
-              "bk_supplier_id": 0,
-              "bk_biz_id": 19,
-              "bk_app_code": "saas-sops",
-              "bk_app_secret": "24eb30a5-1000-4d8a-9e56-1adde91fd825",
-              "bk_username": "saas-sops",
-              "host_info": {
-                  "8": {
-                      "uni_resource_name": "${uni_resource_name}",
-                      "bk_host_innerip": "${node_ip}",
-                      "bk_cloud_id": 8,
-                      "bk_create": "${bk_create}",
-                      "bk_over": "2666-06-06",
-                      "bk_env": "${bk_env}",
-                      "bk_func": "${bk_func}",
-                      "bk_user": "${bk_user}",
-                      "bk_os_type": "1"
-                  }
-              }
-          }
-EOF
-)
-
-    log_info "send request to cmdb: ${request_data}"
-
-    local response
-    response=$(curl -sS -X POST \
-                --insecure \
-                --connect-timeout 30 \
-                --max-time 60 \
-                --header "Content-Type: application/json" \
-                --data "${request_data}" \
-                --resolve paas.cowelltech.com:443:10.8.8.20 \
-                'https://paas.cowelltech.com/api/c/compapi/v2/cc/add_host_to_resource/' 2>&1)
-    local exit_code=$?
-
-    if [[ ${exit_code} -eq 0 ]]; then
-        log_info "add ${node_ip} to cmdb successfully"
-    else
-        log_error "add ${node_ip} to cmdb failed, code: ${exit_code}"
-        log_error "error response: ${response}"
-    fi
-}
 
 # 主函数
 main() {
@@ -160,10 +106,9 @@ main() {
     
     set_hostname
     configure_hosts
-    #install_k8s_components
+    install_k8s_components
     set_kubelet_provider_id
     join_cluster
-    add_host_to_cmdb
 
     log_info "exec after_created_hook script successfully"
 }

@@ -998,6 +998,7 @@ func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
 	if configMap.ObjectMeta.Annotations == nil {
 		configMap.ObjectMeta.Annotations = make(map[string]string)
 	}
+	configMap.Data = make(map[string]string, 2)
 	configMap.Data["NodeGroupsConfig"] = data
 	configMap.ObjectMeta.Annotations[ConfigMapLastUpdatedKey] = time.Now().Format(time.RFC3339)
 	_, err = maps.Update(context.TODO(), configMap, metav1.UpdateOptions{})
