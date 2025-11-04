@@ -87,6 +87,15 @@ func (c *InstanceList) FindByName(insName string) *Instance {
 	return nil
 }
 
+func (c *InstanceList) FindByIp(ip string) *Instance {
+	for i, v := range *c {
+		if v.IP != "" && v.IP == ip {
+			return (*c)[i]
+		}
+	}
+	return nil
+}
+
 func (c *InstanceList) FindByProviderID(providerId string) *Instance {
 	for i, v := range *c {
 		if v.ProviderID != "" && v.ProviderID == providerId {

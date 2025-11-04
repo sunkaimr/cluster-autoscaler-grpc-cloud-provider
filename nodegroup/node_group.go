@@ -289,12 +289,173 @@ func (ngs *NodeGroups) CloudProviderOption() provider.CloudProviderOption {
 	return ngs.cloudProviderOption
 }
 
+// UpdateCloudProviderAccount 没有就创建，有则更新
+func (ngs *NodeGroups) UpdateCloudProviderAccount(addProviders map[string]provider.Provider) error {
+	// 暂时无法校验账号的合法性
+	ngs.Lock()
+	existProviders := ngs.cloudProviderOption.Accounts
+	for providerName, addAccounts := range addProviders {
+		_, ok := existProviders[providerName]
+		if !ok {
+			ngs.cloudProviderOption.Accounts[providerName] = addAccounts
+			continue
+		}
+
+		for accountName, credential := range addAccounts {
+			ngs.cloudProviderOption.Accounts[providerName][accountName] = credential
+		}
+	}
+	ngs.Unlock()
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+
+	return nil
+}
+
+// DeleteCloudProviderAccount 删除云账号
+func (ngs *NodeGroups) DeleteCloudProviderAccount(provider, account string) error {
+	// 校验账号已不再使用
+	// 1. instance的ProviderID不包含provider, account
+	// 2. providerIdTemplate不包含provider, account
+
+	ngs.Lock()
+	for _, ng := range ngs.cache {
+		for _, ins := range ng.Instances {
+			if ins.Stage == StageDeleted || ins.Status == StatusSuccess {
+				continue
+			}
+			insProvider, insAccount, _, _, _ := pcommon.ExtractProviderID(ins.ProviderID)
+			if insProvider == provider && insAccount == account {
+				ngs.Unlock()
+				return fmt.Errorf("cloudProviderOption.%s.%s has used for nodegroup(%s) instance(%s)", provider, account, ng.Id, ins.ProviderID)
+			}
+		}
+	}
+
+	for insParaName, para := range ngs.cloudProviderOption.InstanceParameter {
+		insProvider, insAccount, _, _, _ := pcommon.ExtractProviderID(para.ProviderIdTemplate)
+		if insProvider == provider && insAccount == account {
+			ngs.Unlock()
+			return fmt.Errorf("cloudProviderOption.%s.%s has used for cloudProviderOption.instanceParameter.%s", provider, account, insParaName)
+		}
+	}
+	ngs.Unlock()
+
+	if _, ok := ngs.cloudProviderOption.Accounts[provider]; !ok {
+		return nil
+	}
+
+	if _, ok := ngs.cloudProviderOption.Accounts[provider][account]; !ok {
+		return nil
+	} else {
+		delete(ngs.cloudProviderOption.Accounts[provider], account)
+	}
+
+	if len(ngs.cloudProviderOption.Accounts[provider]) == 0 {
+		delete(ngs.cloudProviderOption.Accounts, provider)
+	}
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+
+	return nil
+}
+
 func (ngs *NodeGroups) InstanceParameter(key string) *provider.InstanceParameter {
 	if v, ok := ngs.cloudProviderOption.InstanceParameter[key]; ok {
 		return &v
 	}
 	return nil
 }
+
+// UpdateInstanceParameter 没有就创建，有则更新
+func (ngs *NodeGroups) UpdateInstanceParameter(addInsParas map[string]provider.InstanceParameter) error {
+	for addInsParaName, addInsPara := range addInsParas {
+		insProvider, insAccount, _, _, err := pcommon.ExtractProviderID(addInsPara.ProviderIdTemplate)
+		if err != nil {
+			return fmt.Errorf("unsupport providerIdTemplate format, %s", err)
+		}
+
+		if providers, ok := ngs.cloudProviderOption.Accounts[insProvider]; !ok {
+			return fmt.Errorf("cloudProviderOption.accounts.%s not exist", insProvider)
+		} else {
+			if _, ok1 := providers[insAccount]; !ok1 {
+				return fmt.Errorf("cloudProviderOption.accounts.%s.%s not exist", insProvider, insAccount)
+			}
+		}
+
+		ngs.Lock()
+		ngs.cloudProviderOption.InstanceParameter[addInsParaName] = addInsPara
+		ngs.Unlock()
+	}
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+
+	return nil
+}
+
+// DeleteInstanceParameter 删除参数
+func (ngs *NodeGroups) DeleteInstanceParameter(name string) error {
+	// 校验参数已不再使用
+	ngs.Lock()
+	for _, ng := range ngs.cache {
+		if ng.InstanceParameter == name {
+			return fmt.Errorf("cloudProviderOption.instanceParameter.%s has use for", name)
+		}
+	}
+	delete(ngs.cloudProviderOption.InstanceParameter, name)
+	ngs.Unlock()
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+
+	return nil
+}
+
+// UpdateNodeGroup 更新
+// NodeTemplate、Instances不支持热更新
+func (ngs *NodeGroups) UpdateNodeGroup(newNg *NodeGroup) error {
+	_, err := ngs.FindNodeGroupById(newNg.Id)
+	if err != nil {
+		return err
+	}
+
+	// 判断InstanceParameter是否存在
+	if _, ok := ngs.cloudProviderOption.InstanceParameter[newNg.InstanceParameter]; !ok {
+		return fmt.Errorf("cloudProviderOption.instanceParameter.%s not exist", newNg.InstanceParameter)
+	}
+
+	for i, v := range ngs.cache {
+		if v.Id != newNg.Id {
+			continue
+		}
+		ngs.Lock()
+		ngs.cache[i].InstanceParameter = newNg.InstanceParameter
+		ngs.cache[i].MinSize = newNg.MinSize
+		ngs.cache[i].MaxSize = newNg.MaxSize
+
+		if newNg.AutoscalingOptions != nil {
+			ngs.cache[i].AutoscalingOptions = newNg.AutoscalingOptions
+		}
+		ngs.Unlock()
+	}
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+	return nil
+}
+
+// DeleteNodeGroup 删除NodeGroup
+//func (ngs *NodeGroups) DeleteNodeGroup(id string) error {
+//	// 涉及node和NodeGroup映射关系的更新
+//
+//	// 更新到config map中
+//	WriteNodeGroupStatusToConfigMap(context.TODO())
+//
+//	return nil
+//}
 
 func (ngs *NodeGroups) List() []NodeGroup {
 	ngs.Lock()
@@ -1238,7 +1399,25 @@ func (ngs *NodeGroups) FilterInstanceByStages(stages ...Stage) []*Instance {
 	return filterInstance
 }
 
-func (ngs *NodeGroups) FilterInstanceByStageAndResult(stage Stage, status ...Status) []*Instance {
+func (ngs *NodeGroups) FilterInstanceByStatus(status ...Status) []*Instance {
+	ngs.Lock()
+	defer ngs.Unlock()
+
+	filterInstance := make([]*Instance, 0, 10)
+	for _, ng := range ngs.cache {
+		for _, ins := range ng.Instances {
+			for _, s := range status {
+				if ins.Status == s {
+					incCopy := *ins
+					filterInstance = append(filterInstance, &incCopy)
+				}
+			}
+		}
+	}
+	return filterInstance
+}
+
+func (ngs *NodeGroups) FilterInstanceByStageAndStatus(stage Stage, status ...Status) []*Instance {
 	ngs.Lock()
 	defer ngs.Unlock()
 
@@ -1395,7 +1574,7 @@ func handleRouteInstances(ctx context.Context, ngs *NodeGroups, key Stage, paral
 			return
 		case <-tick.C:
 			// 判断当前处于InProcess的数量
-			inProcessIns := ngs.FilterInstanceByStageAndResult(key, StatusInProcess)
+			inProcessIns := ngs.FilterInstanceByStageAndStatus(key, StatusInProcess)
 			// 已达到最大并发数量
 			if len(inProcessIns) >= parallelism {
 				continue
