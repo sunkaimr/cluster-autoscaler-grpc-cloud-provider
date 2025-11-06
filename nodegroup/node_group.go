@@ -16,8 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
-
 	"github.com/sethvargo/go-retry"
 	"github.com/spf13/viper"
 	. "github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/nodegroup/instance"
@@ -33,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/deletetaint"
 	"k8s.io/klog/v2"
 )
@@ -402,7 +401,7 @@ func (ngs *NodeGroups) DeleteInstanceParameter(name string) error {
 	ngs.Lock()
 	for _, ng := range ngs.cache {
 		if ng.InstanceParameter == name {
-			return fmt.Errorf("cloudProviderOption.instanceParameter.%s has use for", name)
+			return fmt.Errorf("cloudProviderOption.instanceParameter.%s has use for nodegroup %s", name, ng.Id)
 		}
 	}
 	delete(ngs.cloudProviderOption.InstanceParameter, name)
@@ -425,6 +424,10 @@ func (ngs *NodeGroups) UpdateNodeGroup(newNg *NodeGroup) error {
 	// 判断InstanceParameter是否存在
 	if _, ok := ngs.cloudProviderOption.InstanceParameter[newNg.InstanceParameter]; !ok {
 		return fmt.Errorf("cloudProviderOption.instanceParameter.%s not exist", newNg.InstanceParameter)
+	}
+
+	if newNg.MinSize > newNg.MaxSize {
+		return fmt.Errorf("MaxSize(%d) cannot be less than MinSize(%d)", newNg.MaxSize, newNg.MinSize)
 	}
 
 	for i, v := range ngs.cache {
@@ -994,9 +997,9 @@ func BuildNodeFromTemplate(ng *NodeGroup) *corev1.Node {
 	nodeName := fmt.Sprintf("%s-%d", ngName, rand.Int63())
 
 	node.ObjectMeta = metav1.ObjectMeta{
-		Name:     nodeName,
-		SelfLink: fmt.Sprintf("/api/v1/nodes/%s", nodeName),
-		Labels:   map[string]string{},
+		Name: nodeName,
+		//SelfLink: fmt.Sprintf("/api/v1/nodes/%s", nodeName),
+		Labels: map[string]string{},
 	}
 
 	node.Status = corev1.NodeStatus{
@@ -1062,7 +1065,9 @@ func (ngs *NodeGroups) Yaml() (string, error) {
 
 	var buf bytes.Buffer
 	encoder := yaml.NewEncoder(&buf)
-	defer encoder.Close()
+	defer func() {
+		_ = encoder.Close()
+	}()
 
 	encoder.SetIndent(2)
 	if err := encoder.Encode(ngc); err != nil {
@@ -1172,100 +1177,98 @@ func WriteNodeGroupStatusToConfigMap(ctx context.Context) {
 	return
 }
 
-func SyncNodeGroupStatusFromConfigMap(configMap *corev1.ConfigMap) {
-	namespace := configMap.Namespace
-	configmap := configMap.Name
-
-	// NodeGroupStatus已经发生变动，上锁禁止其他地方再修改
-	equal, err := compareConfigMapMd5(configMap)
-	if err != nil {
-		klog.Errorf("compare configmap(%s/%s) md5 failed, %s", namespace, configmap, err)
-		return
-	}
-
-	if equal {
-		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
-		return
-	} else {
-		klog.V(1).Infof("configmap(%s/%s) md5 changed, need sync to NodeGroupStatus", namespace, configmap)
-	}
-
-	ngs := GetNodeGroups()
-	ngs.Lock()
-	defer ngs.Unlock()
-
-	data := configMap.Data["NodeGroupsConfig"]
-	if len(data) == 0 {
-		klog.Errorf("configmap(%s/%s) data.NodeGroupsConfig is null", namespace, configmap)
-		return
-	}
-
-	var ngc NodeGroupsConfig
-	err = yaml.Unmarshal([]byte(data), &ngc)
-	if err != nil {
-		return
-	}
-
-	// TODO 是否再这里做校验
-	ngs.cloudProviderOption = ngc.CloudProviderOption
-	ngs.cache = make(nodeGroupCache, 0, 10)
-	for _, v := range ngc.NodeGroups {
-		ng := v
-		ngs.cache.add(&ng)
-	}
-
-	klog.V(1).Infof("sync to NodeGroupStatus form configmap(%s/%s) success", namespace, configmap)
-	return
-}
-
-// TODO 是否在此处限制configmap哪些字段可以修改，哪些字段不能修改
-func compareConfigMapMd5(configMap *corev1.ConfigMap) (bool, error) {
-	namespace := configMap.Namespace
-	configmap := configMap.Name
-
-	ngs1, err := GetNodeGroups().Yaml()
-	if err != nil {
-		return false, fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
-	}
-
-	data := configMap.Data["NodeGroupsConfig"]
-	if len(data) == 0 {
-		return false, fmt.Errorf("configmap(%s/%s).NodeGroupsConfig is null", namespace, configmap)
-	}
-
-	var ngs1Copy NodeGroupsConfig
-	err = yaml.Unmarshal([]byte(ngs1), &ngs1Copy)
-	if err != nil {
-		return false, fmt.Errorf("unmarshal ngs1 to NodeGroupsConfig failed, %s", err)
-	}
-
-	var ngs2Copy NodeGroupsConfig
-	err = yaml.Unmarshal([]byte(data), &ngs2Copy)
-	if err != nil {
-		return false, fmt.Errorf("unmarshal configmap(%s/%s).NodeGroupsConfig failed, %s", namespace, configmap, err)
-	}
-
-	for i := range ngs1Copy.NodeGroups {
-		for j := range ngs1Copy.NodeGroups[i].Instances {
-			ngs1Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
-		}
-	}
-	for i := range ngs2Copy.NodeGroups {
-		for j := range ngs2Copy.NodeGroups[i].Instances {
-			ngs2Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
-		}
-	}
-
-	cleanedNgs1, err := yaml.Marshal(ngs1Copy)
-	if err != nil {
-		return false, fmt.Errorf("marshal cleaned ngs1 to yaml failed, %s", err)
-	}
-	cleanedNgs2, err := yaml.Marshal(ngs2Copy)
-	if err != nil {
-		return false, fmt.Errorf("marshal cleaned ngs2 to yaml failed, %s", err)
-	}
-	return md5.Sum(cleanedNgs1) == md5.Sum(cleanedNgs2), nil
-}
+//func SyncNodeGroupStatusFromConfigMap(configMap *corev1.ConfigMap) {
+//	namespace := configMap.Namespace
+//	configmap := configMap.Name
+//
+//	// NodeGroupStatus已经发生变动，上锁禁止其他地方再修改
+//	equal, err := compareConfigMapMd5(configMap)
+//	if err != nil {
+//		klog.Errorf("compare configmap(%s/%s) md5 failed, %s", namespace, configmap, err)
+//		return
+//	}
+//
+//	if equal {
+//		klog.V(5).Infof("configmap(%s/%s) md5 not changed", namespace, configmap)
+//		return
+//	} else {
+//		klog.V(1).Infof("configmap(%s/%s) md5 changed, need sync to NodeGroupStatus", namespace, configmap)
+//	}
+//
+//	ngs := GetNodeGroups()
+//	ngs.Lock()
+//	defer ngs.Unlock()
+//
+//	data := configMap.Data["NodeGroupsConfig"]
+//	if len(data) == 0 {
+//		klog.Errorf("configmap(%s/%s) data.NodeGroupsConfig is null", namespace, configmap)
+//		return
+//	}
+//
+//	var ngc NodeGroupsConfig
+//	err = yaml.Unmarshal([]byte(data), &ngc)
+//	if err != nil {
+//		return
+//	}
+//
+//	ngs.cloudProviderOption = ngc.CloudProviderOption
+//	ngs.cache = make(nodeGroupCache, 0, 10)
+//	for _, v := range ngc.NodeGroups {
+//		ng := v
+//		ngs.cache.add(&ng)
+//	}
+//
+//	klog.V(1).Infof("sync to NodeGroupStatus form configmap(%s/%s) success", namespace, configmap)
+//	return
+//}
+//
+//func compareConfigMapMd5(configMap *corev1.ConfigMap) (bool, error) {
+//	namespace := configMap.Namespace
+//	configmap := configMap.Name
+//
+//	ngs1, err := GetNodeGroups().Yaml()
+//	if err != nil {
+//		return false, fmt.Errorf("marshal NodeGroup to yaml failed, %s", err)
+//	}
+//
+//	data := configMap.Data["NodeGroupsConfig"]
+//	if len(data) == 0 {
+//		return false, fmt.Errorf("configmap(%s/%s).NodeGroupsConfig is null", namespace, configmap)
+//	}
+//
+//	var ngs1Copy NodeGroupsConfig
+//	err = yaml.Unmarshal([]byte(ngs1), &ngs1Copy)
+//	if err != nil {
+//		return false, fmt.Errorf("unmarshal ngs1 to NodeGroupsConfig failed, %s", err)
+//	}
+//
+//	var ngs2Copy NodeGroupsConfig
+//	err = yaml.Unmarshal([]byte(data), &ngs2Copy)
+//	if err != nil {
+//		return false, fmt.Errorf("unmarshal configmap(%s/%s).NodeGroupsConfig failed, %s", namespace, configmap, err)
+//	}
+//
+//	for i := range ngs1Copy.NodeGroups {
+//		for j := range ngs1Copy.NodeGroups[i].Instances {
+//			ngs1Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
+//		}
+//	}
+//	for i := range ngs2Copy.NodeGroups {
+//		for j := range ngs2Copy.NodeGroups[i].Instances {
+//			ngs2Copy.NodeGroups[i].Instances[j].UpdateTime = time.Time{}
+//		}
+//	}
+//
+//	cleanedNgs1, err := yaml.Marshal(ngs1Copy)
+//	if err != nil {
+//		return false, fmt.Errorf("marshal cleaned ngs1 to yaml failed, %s", err)
+//	}
+//	cleanedNgs2, err := yaml.Marshal(ngs2Copy)
+//	if err != nil {
+//		return false, fmt.Errorf("marshal cleaned ngs2 to yaml failed, %s", err)
+//	}
+//	return md5.Sum(cleanedNgs1) == md5.Sum(cleanedNgs2), nil
+//}
 
 // 从config map中获取最nodegroup的状态配置
 // 1, 若cm不存在则以配置文件为主
@@ -1297,10 +1300,8 @@ func (ngs *NodeGroups) readNodeGroupFromConfigMap() (*NodeGroupsConfig, error) {
 func (ngs *NodeGroups) readNodeGroupsFromFile() (*NodeGroupsConfig, error) {
 	filePath := ngs.ops.configFile
 
-	path := filepath.Dir(filePath)
 	filename := filepath.Base(filePath)
-
-	viper.AddConfigPath(path)
+	viper.AddConfigPath(filepath.Dir(filePath))
 
 	f := strings.Split(filename, ".")
 	switch len(f) {

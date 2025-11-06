@@ -1,9 +1,9 @@
 # Image URL to use all building/pushing image targets
-VER ?= v1.0.1
+VER ?= v1.1.0
 # application name
 APP ?= cluster-autoscaler-grpc-cloud-provider
 
-IMG ?= cowell-images.tencentcloudcr.com/cowellpi/${APP}:${VER}
+IMG ?= ${APP}:${VER}
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))

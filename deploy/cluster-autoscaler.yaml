@@ -137,7 +137,7 @@ spec:
     spec:
       serviceAccountName: cluster-autoscaler
       containers:
-        - image: cowell-images.tencentcloudcr.com/docker/cluster-autoscaler:1.25.0
+        - image: cluster-autoscaler:1.25.0
           name: cluster-autoscaler
           resources:
             limits:

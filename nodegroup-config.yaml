@@ -4,7 +4,7 @@ cloudProviderOption:
       secretId: "XXX"
       secretKey: "YYY"
   instanceParameter:
-    tencentcloud_beijing5_10-2-20-x:
+    tencentcloud_beijing5_1-2-3-x:
       providerIdTemplate: "externalgrpc://tencentcloud/zhansan/ap-beijing/{{InstanceID}}"
       parameter:
         InstanceChargeType: "PREPAID"
@@ -80,6 +80,7 @@ nodeGroups:
     scaleDownGpuUtilizationThreshold: 0.5
     scaleDownUnneededTime: "40m"
     scaleDownUnreadyTime: "10m"
+  instanceParameter: "tencentcloud_beijing5_1-2-3-x"
   instances:
     - id: 6ddb4200
       name: 1.2.3.4
