@@ -64,7 +64,7 @@ var grpcServer *grpc.Server
 
 func main() {
 	klog.InitFlags(nil)
-	klog.Infof("version: %s ,gitCommit: %s, buildTime: %s, goVersion: %s", version, gitCommit, buildTime, goVersion)
+	klog.Infof("version: %s, gitCommit: %s, buildTime: %s, goVersion: %s", version, gitCommit, buildTime, goVersion)
 
 	leaderElection := defaultLeaderElectionConfiguration()
 	options.BindLeaderElectionFlags(&leaderElection, pflag.CommandLine)
