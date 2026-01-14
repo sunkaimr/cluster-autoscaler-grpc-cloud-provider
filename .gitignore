@@ -7,3 +7,4 @@ go.sum
 nodegroup-config-demo.yaml
 sync.ffs_db
 kube_config
+ui/node_modules

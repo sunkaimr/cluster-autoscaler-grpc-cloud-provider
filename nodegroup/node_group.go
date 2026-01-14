@@ -351,8 +351,51 @@ func (ngs *NodeGroups) DeleteCloudProviderAccount(provider, account string) erro
 		delete(ngs.cloudProviderOption.Accounts[provider], account)
 	}
 
-	if len(ngs.cloudProviderOption.Accounts[provider]) == 0 {
-		delete(ngs.cloudProviderOption.Accounts, provider)
+	// if len(ngs.cloudProviderOption.Accounts[provider]) == 0 {
+	// 	delete(ngs.cloudProviderOption.Accounts, provider)
+	// }
+
+	// 更新到config map中
+	WriteNodeGroupStatusToConfigMap(context.TODO())
+
+	return nil
+}
+
+// DeleteCloudProvider 删除云服务商（包括其下所有账号）
+func (ngs *NodeGroups) DeleteCloudProvider(providerName string) error {
+	ngs.Lock()
+	// 检查该供应商下的账号是否被使用
+	if accounts, ok := ngs.cloudProviderOption.Accounts[providerName]; ok {
+		for accountName := range accounts {
+			// 检查 instance 是否在使用
+			for _, ng := range ngs.cache {
+				for _, ins := range ng.Instances {
+					if ins.Stage == StageDeleted || ins.Status == StatusSuccess {
+						continue
+					}
+					insProvider, insAccount, _, _, _ := pcommon.ExtractProviderID(ins.ProviderID)
+					if insProvider == providerName && insAccount == accountName {
+						ngs.Unlock()
+						return fmt.Errorf("cloudProviderOption.%s.%s has used for nodegroup(%s) instance(%s)", providerName, accountName, ng.Id, ins.ProviderID)
+					}
+				}
+			}
+
+			// 检查 instanceParameter 是否在使用
+			for insParaName, para := range ngs.cloudProviderOption.InstanceParameter {
+				insProvider, insAccount, _, _, _ := pcommon.ExtractProviderID(para.ProviderIdTemplate)
+				if insProvider == providerName && insAccount == accountName {
+					ngs.Unlock()
+					return fmt.Errorf("cloudProviderOption.%s.%s has used for cloudProviderOption.instanceParameter.%s", providerName, accountName, insParaName)
+				}
+			}
+		}
+	}
+	ngs.Unlock()
+
+	// 删除供应商
+	if _, ok := ngs.cloudProviderOption.Accounts[providerName]; ok {
+		delete(ngs.cloudProviderOption.Accounts, providerName)
 	}
 
 	// 更新到config map中
