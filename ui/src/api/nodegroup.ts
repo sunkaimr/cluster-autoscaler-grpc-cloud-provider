@@ -17,3 +17,11 @@ export function getNodeGroups(id?: string) {
 export function updateNodeGroup(data: NodeGroup) {
   return request.post<ApiResponse<NodeGroup>>('/nodegroup', data)
 }
+
+// 增加或减少节点组内节点数量
+// delta > 0: 增加节点, delta < 0: 减少节点
+export function changeNodeGroupSize(nodeGroupId: string, delta: number) {
+  return request.patch<ApiResponse<any>>(`/nodegroup/${nodeGroupId}`, null, {
+    params: { delta }
+  })
+}

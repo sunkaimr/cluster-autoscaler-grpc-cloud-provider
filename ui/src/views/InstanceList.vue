@@ -6,7 +6,13 @@
     <el-card shadow="never" style="margin-bottom: 20px">
       <el-form :inline="true" :model="filterForm">
         <el-form-item label="NodeGroup">
-          <el-select v-model="filterForm.nodegroup" placeholder="全部" clearable style="width: 200px">
+          <el-select
+            v-model="filterForm.nodegroup"
+            placeholder="全部"
+            clearable
+            style="width: 200px"
+            @change="handleFilterChange"
+          >
             <el-option
               v-for="ng in nodeGroups"
               :key="ng.id"
@@ -17,7 +23,13 @@
         </el-form-item>
 
         <el-form-item label="Stage">
-          <el-select v-model="filterForm.stage" placeholder="全部" clearable style="width: 150px">
+          <el-select
+            v-model="filterForm.stage"
+            placeholder="全部"
+            clearable
+            style="width: 150px"
+            @change="handleFilterChange"
+          >
             <el-option
               v-for="stage in stages"
               :key="stage"
@@ -28,7 +40,13 @@
         </el-form-item>
 
         <el-form-item label="Status">
-          <el-select v-model="filterForm.status" placeholder="全部" clearable style="width: 150px">
+          <el-select
+            v-model="filterForm.status"
+            placeholder="全部"
+            clearable
+            style="width: 150px"
+            @change="handleFilterChange"
+          >
             <el-option
               v-for="status in statuses"
               :key="status"
@@ -41,10 +59,18 @@
         <el-form-item label="搜索">
           <el-input
             v-model="filterForm.keyword"
-            placeholder="ID/IP/Name"
+            placeholder="请输入搜索内容"
             clearable
-            style="width: 200px"
-          />
+            style="width: 300px"
+          >
+            <template #prepend>
+              <el-select v-model="filterForm.searchType" style="width: 90px">
+                <el-option label="ID" value="id" />
+                <el-option label="Name" value="name" />
+                <el-option label="IP" value="ip" />
+              </el-select>
+            </template>
+          </el-input>
         </el-form-item>
 
         <el-form-item>
@@ -174,6 +200,7 @@ const filterForm = ref({
   nodegroup: '',
   stage: '',
   status: '',
+  searchType: 'id' as 'id' | 'name' | 'ip',
   keyword: ''
 })
 
@@ -193,6 +220,14 @@ const form = ref({
   status: '' as Status
 })
 
+// NodeGroup、Stage、Status 改变时自动刷新
+const handleFilterChange = async () => {
+  // 重置到第一页
+  pagination.value.page = 1
+  // 自动刷新表格
+  await loadInstancesWithFilter()
+}
+
 const handleFilter = async () => {
   try {
     // 重置到第一页
@@ -209,6 +244,7 @@ const handleReset = async () => {
     nodegroup: '',
     stage: '',
     status: '',
+    searchType: 'id',
     keyword: ''
   }
   // 重置到第一页
@@ -283,16 +319,10 @@ const loadInstancesWithFilter = async () => {
     if (filterForm.value.stage) params.stage = filterForm.value.stage
     if (filterForm.value.status) params.status = filterForm.value.status
 
-    // 关键字智能检测
+    // 根据选择的搜索类型设置搜索参数
     if (filterForm.value.keyword) {
       const keyword = filterForm.value.keyword.trim()
-      if (keyword.includes('.')) {
-        params.ip = keyword
-      } else if (keyword.includes('-')) {
-        params.name = keyword
-      } else {
-        params.id = keyword
-      }
+      params[filterForm.value.searchType] = keyword
     }
 
     const instancesRes = await getInstances(params)

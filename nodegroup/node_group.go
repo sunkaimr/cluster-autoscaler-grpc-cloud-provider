@@ -442,8 +442,10 @@ func (ngs *NodeGroups) UpdateInstanceParameter(addInsParas map[string]provider.I
 func (ngs *NodeGroups) DeleteInstanceParameter(name string) error {
 	// 校验参数已不再使用
 	ngs.Lock()
+
 	for _, ng := range ngs.cache {
 		if ng.InstanceParameter == name {
+			ngs.Unlock()
 			return fmt.Errorf("cloudProviderOption.instanceParameter.%s has use for nodegroup %s", name, ng.Id)
 		}
 	}
@@ -465,8 +467,10 @@ func (ngs *NodeGroups) UpdateNodeGroup(newNg *NodeGroup) error {
 	}
 
 	// 判断InstanceParameter是否存在
-	if _, ok := ngs.cloudProviderOption.InstanceParameter[newNg.InstanceParameter]; !ok {
-		return fmt.Errorf("cloudProviderOption.instanceParameter.%s not exist", newNg.InstanceParameter)
+	if newNg.InstanceParameter != "" {
+		if _, ok := ngs.cloudProviderOption.InstanceParameter[newNg.InstanceParameter]; !ok {
+			return fmt.Errorf("cloudProviderOption.instanceParameter.%s not exist", newNg.InstanceParameter)
+		}
 	}
 
 	if newNg.MinSize > newNg.MaxSize {
@@ -482,9 +486,9 @@ func (ngs *NodeGroups) UpdateNodeGroup(newNg *NodeGroup) error {
 		ngs.cache[i].MinSize = newNg.MinSize
 		ngs.cache[i].MaxSize = newNg.MaxSize
 
-		if newNg.AutoscalingOptions != nil {
-			ngs.cache[i].AutoscalingOptions = newNg.AutoscalingOptions
-		}
+		// if newNg.AutoscalingOptions != nil {
+		ngs.cache[i].AutoscalingOptions = newNg.AutoscalingOptions
+		// }
 		ngs.Unlock()
 	}
 

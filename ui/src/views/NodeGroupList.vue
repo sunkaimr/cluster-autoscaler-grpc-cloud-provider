@@ -8,9 +8,11 @@
       <el-table-column prop="maxSize" label="MaxSize" min-width="100" align="center" />
       <el-table-column prop="targetSize" label="TargetSize" min-width="120" align="center" />
       <el-table-column prop="instanceParameter" label="Instance 参数" min-width="200" />
-      <el-table-column label="操作" min-width="180" align="center" fixed="right">
+      <el-table-column label="操作" min-width="150" align="center" fixed="right">
         <template #default="{ row }">
-          <el-button type="info" size="small" @click="handleShowMore(row)">更多</el-button>
+          <el-button type="success" size="small" @click="handleChangeSize(row, 'increase')">+</el-button>
+          <el-button type="warning" size="small" @click="handleChangeSize(row, 'decrease')">-</el-button>
+          <el-button type="info" size="small" @click="handleShowMore(row)">详情</el-button>
           <el-button type="primary" size="small" @click="handleEdit(row)">编辑</el-button>
         </template>
       </el-table-column>
@@ -69,14 +71,49 @@
         <el-button type="primary" :disabled="!!yamlError" @click="handleSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 增加/减少节点对话框 -->
+    <el-dialog
+      v-model="changeSizeDialogVisible"
+      :title="changeSizeType === 'increase' ? '增加节点' : '减少节点'"
+      width="500px"
+      @close="handleChangeSizeDialogClose"
+    >
+      <el-form :model="changeSizeForm" label-width="120px">
+        <el-form-item label="NodeGroup ID">
+          <el-input v-model="changeSizeForm.nodeGroupId" disabled />
+        </el-form-item>
+        <el-form-item label="当前 TargetSize">
+          <el-input v-model="changeSizeForm.currentSize" disabled />
+        </el-form-item>
+        <el-form-item :label="changeSizeType === 'increase' ? '增加数量' : '减少数量'">
+          <el-input-number
+            v-model="changeSizeForm.delta"
+            :min="1"
+            :max="changeSizeType === 'increase' ? 100 : changeSizeForm.currentSize"
+            style="width: 100%"
+          />
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="changeSizeDialogVisible = false">取消</el-button>
+        <el-button
+          :type="changeSizeType === 'increase' ? 'success' : 'warning'"
+          @click="handleConfirmChangeSize"
+        >
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { parse, stringify } from 'yaml'
-import { getNodeGroups, updateNodeGroup } from '@/api/nodegroup'
+import { getNodeGroups, updateNodeGroup, changeNodeGroupSize } from '@/api/nodegroup'
 import type { NodeGroup } from '@/types'
 
 const nodeGroups = ref<NodeGroup[]>([])
@@ -93,6 +130,15 @@ const editDialogVisible = ref(false)
 const editYaml = ref('')
 const yamlError = ref('')
 const currentNodeGroup = ref<NodeGroup | null>(null)
+
+// 增加/减少节点对话框
+const changeSizeDialogVisible = ref(false)
+const changeSizeType = ref<'increase' | 'decrease'>('increase')
+const changeSizeForm = ref({
+  nodeGroupId: '',
+  currentSize: 0,
+  delta: 1
+})
 
 // 显示更多信息（只读）
 const handleShowMore = (row: NodeGroup) => {
@@ -159,6 +205,54 @@ const handleDialogClose = () => {
   editYaml.value = ''
   yamlError.value = ''
   currentNodeGroup.value = null
+}
+
+// 打开增加/减少节点对话框
+const handleChangeSize = (row: NodeGroup, type: 'increase' | 'decrease') => {
+  changeSizeType.value = type
+  changeSizeForm.value = {
+    nodeGroupId: row.id,
+    currentSize: row.targetSize || 0,
+    delta: 1
+  }
+  changeSizeDialogVisible.value = true
+}
+
+// 确认增加/减少节点
+const handleConfirmChangeSize = async () => {
+  try {
+    const delta = changeSizeType.value === 'increase'
+      ? changeSizeForm.value.delta
+      : -changeSizeForm.value.delta
+
+    await ElMessageBox.confirm(
+      `确定要${changeSizeType.value === 'increase' ? '增加' : '减少'} ${changeSizeForm.value.delta} 个节点吗？`,
+      '确认操作',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    await changeNodeGroupSize(changeSizeForm.value.nodeGroupId, delta)
+    ElMessage.success('操作成功')
+    changeSizeDialogVisible.value = false
+    await loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(`操作失败: ${error.message || error}`)
+    }
+  }
+}
+
+// 增加/减少节点对话框关闭
+const handleChangeSizeDialogClose = () => {
+  changeSizeForm.value = {
+    nodeGroupId: '',
+    currentSize: 0,
+    delta: 1
+  }
 }
 
 // 加载数据

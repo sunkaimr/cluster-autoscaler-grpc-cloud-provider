@@ -13,5 +13,10 @@ export function updateAccount(data: Accounts) {
 
 // 删除云账号
 export function deleteAccount(provider: string, account: string) {
-  return request.delete<ApiResponse<Accounts>>(`/cloud-provider-option/account/${provider}/${account}`)
+  return request.delete<ApiResponse<Accounts>>(`/cloud-provider-option/provider/${provider}/account/${account}`)
+}
+
+// 删除云服务商（包括其下所有账号）
+export function deleteProvider(provider: string) {
+  return request.delete<ApiResponse<Accounts>>(`/cloud-provider-option/provider/${provider}`)
 }
