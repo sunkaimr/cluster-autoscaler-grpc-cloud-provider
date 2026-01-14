@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -35,13 +36,20 @@ var (
 	CodeDeleteProviderAccountErr = ServiceCode{4001402, "删除provider账号失败"}
 
 	CodeDeleteInstanceParameterErr = ServiceCode{4002401, "删除Instance参数失败"}
-	CodeModifyInstanceParameterErr = ServiceCode{4002401, "修改Instance参数失败"}
-	CodeInstanceParameterNotFound  = ServiceCode{4042404, "Instance参数不存在"}
+	CodeModifyInstanceParameterErr = ServiceCode{4002402, "修改Instance参数失败"}
+	CodeInstanceParameterNotFound  = ServiceCode{4042401, "Instance参数不存在"}
 
-	CodeNodeGroupNotFound  = ServiceCode{4042404, "NodeGroup不存在"}
-	CodeModifyNodeGroupErr = ServiceCode{4002401, "修改Nodegroup失败"}
-	CodeInstanceNotFound   = ServiceCode{4042404, "Instance不存在"}
+	CodeModifyNodeGroupErr = ServiceCode{4003401, "修改Nodegroup失败"}
+	CodeNodeGroupNotFound  = ServiceCode{4043401, "NodeGroup不存在"}
+	CodeInstanceNotFound   = ServiceCode{4043402, "Instance不存在"}
 )
+
+func ServiceCode2HttpCode(r ServiceCode) int {
+	if r.Status == 0 {
+		return http.StatusOK
+	}
+	return r.Status / 10000
+}
 
 func HttpServer(ctx context.Context, addr string) {
 	e := echo.New()
@@ -61,7 +69,9 @@ func HttpServer(ctx context.Context, addr string) {
 	// 添加或更新账户
 	v1.POST("/cloud-provider-option/account", UpdateCloudProviderOptionAccountHandler)
 	// 删除账户
-	v1.DELETE("/cloud-provider-option/account/:provider/:account", DeleteCloudProviderOptionAccountHandler)
+	v1.DELETE("/cloud-provider-option/provider/:provider/account/:account", DeleteCloudProviderOptionAccountHandler)
+	// 删除供应商
+	v1.DELETE("/cloud-provider-option/provider/:provider", DeleteCloudProviderHandler)
 
 	// 查看Instance参数
 	v1.GET("/cloud-provider-option/instance-parameter", GetCloudProviderOptionInstanceParameterHandler)
@@ -72,7 +82,14 @@ func HttpServer(ctx context.Context, addr string) {
 
 	v1.GET("/nodegroup", GetNodeGroupHandler)
 	v1.POST("/nodegroup", UpdateNodeGroupHandler)
-	//v1.DELETE("/nodegroup/:name", DeleteNodeGroupHandler) // 暂时不提供这个接口，有需要直接修改config-map
+
+	// 增加或减少节点组内节点数量，需要2个参数：节点组ID、增加节点的数量（正为增加，负为减少）
+	// /nodegroup/:nodegroup?delta=1 为增加一个
+	// /nodegroup/:nodegroup?delta=-1 为减少一个
+	v1.PATCH("/nodegroup/:nodegroup", ChangeNodeGroupSizeHandler)
+	// 删除节点组中的节点
+	v1.DELETE("/nodegroup/:nodegroup/nodename/:nodename", DeleteNodeGroupNodeHandler)
+	//v1.DELETE("/nodegroup/:nodegroup", DeleteNodeGroupHandler) // 暂时不提供这个接口，有需要直接修改config-map
 
 	v1.GET("/nodegroup/instance", GetNodeGroupInstanceHandler)
 	v1.POST("/nodegroup/instance", UpdateNodeGroupInstanceHandler)
@@ -123,7 +140,7 @@ func addLogger(next echo.HandlerFunc) echo.HandlerFunc {
 func GetNodeGroupStatusHandler(c echo.Context) error {
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data})
 }
@@ -131,7 +148,7 @@ func GetNodeGroupStatusHandler(c echo.Context) error {
 func GetCloudProviderOptionAccountHandler(c echo.Context) error {
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.CloudProviderOption.Accounts})
 }
@@ -141,17 +158,17 @@ func UpdateCloudProviderOptionAccountHandler(c echo.Context) error {
 	addProviders := map[string]provider.Provider{}
 	err := c.Bind(&addProviders)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeParaError, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeParaError), Response{ServiceCode: CodeParaError, Error: err.Error()})
 	}
 
 	err = nodegroup.GetNodeGroups().UpdateCloudProviderAccount(addProviders)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeUpdateProviderAccountErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeUpdateProviderAccountErr), Response{ServiceCode: CodeUpdateProviderAccountErr, Error: err.Error()})
 	}
 
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.CloudProviderOption.Accounts})
@@ -164,12 +181,29 @@ func DeleteCloudProviderOptionAccountHandler(c echo.Context) error {
 
 	err := nodegroup.GetNodeGroups().DeleteCloudProviderAccount(delProvider, delAccount)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeDeleteProviderAccountErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeDeleteProviderAccountErr), Response{ServiceCode: CodeDeleteProviderAccountErr, Error: err.Error()})
 	}
 
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.CloudProviderOption.Accounts})
+}
+
+// DeleteCloudProviderHandler 删除云服务商（包括其下所有账号）
+func DeleteCloudProviderHandler(c echo.Context) error {
+	delProvider := c.Param("provider")
+
+	err := nodegroup.GetNodeGroups().DeleteCloudProvider(delProvider)
+	if err != nil {
+		return c.JSON(ServiceCode2HttpCode(CodeDeleteProviderAccountErr), Response{ServiceCode: CodeDeleteProviderAccountErr, Error: err.Error()})
+	}
+
+	data, err := nodegroup.GetNodeGroups().Status()
+	if err != nil {
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.CloudProviderOption.Accounts})
@@ -180,7 +214,7 @@ func GetCloudProviderOptionInstanceParameterHandler(c echo.Context) error {
 	name := c.QueryParam("name")
 	ngc, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 	if name == "" {
 		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &ngc.CloudProviderOption.InstanceParameter})
@@ -190,7 +224,7 @@ func GetCloudProviderOptionInstanceParameterHandler(c echo.Context) error {
 		data := map[string]provider.InstanceParameter{name: para}
 		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: data})
 	} else {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeInstanceParameterNotFound, Error: fmt.Sprintf("cloudProviderOption.instanceParameter.%s not exist", name)})
+		return c.JSON(ServiceCode2HttpCode(CodeInstanceParameterNotFound), Response{ServiceCode: CodeInstanceParameterNotFound, Error: fmt.Sprintf("cloudProviderOption.instanceParameter.%s not exist", name)})
 	}
 }
 
@@ -199,17 +233,17 @@ func UpdateCloudProviderOptionInstanceParameterHandler(c echo.Context) error {
 	addInstanceParameter := map[string]provider.InstanceParameter{}
 	err := c.Bind(&addInstanceParameter)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeParaError, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeParaError), Response{ServiceCode: CodeParaError, Error: err.Error()})
 	}
 
 	err = nodegroup.GetNodeGroups().UpdateInstanceParameter(addInstanceParameter)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeModifyInstanceParameterErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeModifyInstanceParameterErr), Response{ServiceCode: CodeModifyInstanceParameterErr, Error: err.Error()})
 	}
 
 	ngc, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &ngc.CloudProviderOption.InstanceParameter})
 }
@@ -220,12 +254,12 @@ func DeleteCloudProviderOptionInstanceParameterHandler(c echo.Context) error {
 
 	err := nodegroup.GetNodeGroups().DeleteInstanceParameter(name)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeDeleteInstanceParameterErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeDeleteInstanceParameterErr), Response{ServiceCode: CodeDeleteInstanceParameterErr, Error: err.Error()})
 	}
 
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.CloudProviderOption.InstanceParameter})
@@ -236,7 +270,7 @@ func GetNodeGroupHandler(c echo.Context) error {
 
 	data, err := nodegroup.GetNodeGroups().Status()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 
 	if id != "" {
@@ -246,7 +280,7 @@ func GetNodeGroupHandler(c echo.Context) error {
 				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &data.NodeGroups[i]})
 			}
 		}
-		return c.JSON(http.StatusNotFound, Response{ServiceCode: CodeNodeGroupNotFound})
+		return c.JSON(ServiceCode2HttpCode(CodeNodeGroupNotFound), Response{ServiceCode: CodeNodeGroupNotFound})
 	}
 
 	for i := 0; i < len(data.NodeGroups); i++ {
@@ -260,17 +294,17 @@ func UpdateNodeGroupHandler(c echo.Context) error {
 	ng := &nodegroup.NodeGroup{}
 	err := c.Bind(ng)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeParaError, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeParaError), Response{ServiceCode: CodeParaError, Error: err.Error()})
 	}
 
 	err = nodegroup.GetNodeGroups().UpdateNodeGroup(ng)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeModifyNodeGroupErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeModifyNodeGroupErr), Response{ServiceCode: CodeModifyNodeGroupErr, Error: err.Error()})
 	}
 
 	data, err := nodegroup.GetNodeGroups().FindNodeGroupById(ng.Id)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: data})
 }
@@ -304,7 +338,7 @@ func GetNodeGroupInstanceHandler(c echo.Context) error {
 				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
 			}
 		}
-		return c.JSON(http.StatusNotFound, Response{ServiceCode: CodeInstanceNotFound})
+		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
 	} else if name != "" {
 		for _, v := range ngs {
 			if ins := v.Instances.FindByName(name); ins != nil {
@@ -312,7 +346,7 @@ func GetNodeGroupInstanceHandler(c echo.Context) error {
 				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
 			}
 		}
-		return c.JSON(http.StatusNotFound, Response{ServiceCode: CodeInstanceNotFound})
+		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
 	} else if ip != "" {
 		for _, v := range ngs {
 			if ins := v.Instances.FindByIp(ip); ins != nil {
@@ -320,7 +354,7 @@ func GetNodeGroupInstanceHandler(c echo.Context) error {
 				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
 			}
 		}
-		return c.JSON(http.StatusNotFound, Response{ServiceCode: CodeInstanceNotFound})
+		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
 	} else if stage != "" {
 		ins := nodegroup.GetNodeGroups().FilterInstanceByStages(instance.Stage(stage))
 		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: ins})
@@ -343,7 +377,7 @@ func UpdateNodeGroupInstanceHandler(c echo.Context) error {
 	var newIns []*instance.Instance
 	err := c.Bind(&newIns)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{ServiceCode: CodeParaError, Error: err.Error()})
+		return c.JSON(ServiceCode2HttpCode(CodeParaError), Response{ServiceCode: CodeParaError, Error: err.Error()})
 	}
 
 	for _, v := range newIns {
@@ -363,4 +397,46 @@ func UpdateNodeGroupInstanceHandler(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &instances})
+}
+
+func ChangeNodeGroupSizeHandler(c echo.Context) error {
+	id := c.Param("nodegroup")
+	deltaStr := c.QueryParam("delta")
+	delta, err := strconv.Atoi(deltaStr)
+	if err != nil {
+		return c.JSON(ServiceCode2HttpCode(CodeParaError), Response{ServiceCode: CodeParaError, Error: err.Error()})
+	}
+
+	if delta >= 0 {
+		klog.V(0).Infof("got NodeGroupIncreaseSize request: nodegroup(%s) request add %d node", id, delta)
+		actuality, err := nodegroup.GetNodeGroups().NodeGroupIncreaseSize(id, delta)
+		if err != nil {
+			err = fmt.Errorf("nodegroup(%s) increase %d node failed, %s", id, delta, err)
+			klog.Error(err)
+			return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		}
+		klog.V(0).Infof("nodegroup(%s) request increase %d node actual increase %d node", id, delta, actuality)
+	} else {
+		// 如果还有未加入集群的节点则不再加入并走回收节点流程
+		actuality, err := nodegroup.GetNodeGroups().DecreaseNodeGroupTargetSize(id, -delta)
+		if err != nil {
+			err = fmt.Errorf("nodegroup(%s) decrease %d node failed, %s", id, -delta, err)
+			klog.Error(err)
+			return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
+		}
+		klog.V(0).Infof("nodegroup(%s) request decrease %d node actual decrease %d node", id, -delta, actuality)
+	}
+	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk})
+}
+
+func DeleteNodeGroupNodeHandler(c echo.Context) error {
+	id := c.Param("nodegroup")
+	nodename := c.Param("nodename")
+	err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroupByNodeName(id, nodename)
+	if err != nil {
+		err = fmt.Errorf("nodegroup(%s) delete %d node failed, %s", id, nodename, err)
+		klog.Error(err)
+		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
+	}
+	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk})
 }

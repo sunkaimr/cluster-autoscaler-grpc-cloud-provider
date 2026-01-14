@@ -217,7 +217,6 @@ func (_ *Wrapper) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.Nod
 	debug(req)
 
 	id := req.GetId()
-	ngs := nodegroup.GetNodeGroups()
 
 	klog.V(0).Infof("got NodeGroupDecreaseTargetSize request: nodegroup(%s) decrease %d node", id, req.GetDelta())
 
@@ -230,7 +229,7 @@ func (_ *Wrapper) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.Nod
 	}
 
 	// 如果还有未加入集群的节点则不再加入并走回收节点流程
-	actuality, err := ngs.DecreaseNodeGroupTargetSize(id, -decreaseSize)
+	actuality, err := nodegroup.GetNodeGroups().DecreaseNodeGroupTargetSize(id, -decreaseSize)
 	if err != nil {
 		err = fmt.Errorf("nodegroup(%s) decrease %d node failed, %s", id, req.GetDelta(), err)
 		klog.Error(err)
