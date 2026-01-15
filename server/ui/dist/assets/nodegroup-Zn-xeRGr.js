@@ -1,0 +1,1 @@
+import{i as t}from"./index-UDkyn1f5.js";function u(){return t.get("/nodegroup-status")}function n(o){return t.get("/nodegroup",{params:{id:o}})}function a(o){return t.post("/nodegroup",o)}function p(o,e){return t.patch(`/nodegroup/${o}`,null,{params:{delta:e}})}export{n as a,p as c,u as g,a as u};

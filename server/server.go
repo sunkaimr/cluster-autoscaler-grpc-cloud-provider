@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,6 +17,9 @@ import (
 	"github.com/sunkaimr/cluster-autoscaler-grpc-cloud-provider/provider"
 	"k8s.io/klog/v2"
 )
+
+//go:embed ui/dist
+var embeddedFiles embed.FS
 
 type Response struct {
 	ServiceCode
@@ -60,6 +65,14 @@ func HttpServer(ctx context.Context, addr string) {
 		middleware.LoggerWithConfig(middleware.LoggerConfig{Output: io.Discard}),
 		addLogger,
 	)
+
+	// Serve embedded UI files
+	uiFS, err := fs.Sub(embeddedFiles, "ui/dist")
+	if err != nil {
+		klog.Errorf("failed to get embedded UI files: %s", err)
+	} else {
+		e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(uiFS))))
+	}
 
 	v1 := e.Group("/api/v1")
 	v1.GET("/nodegroup-status", GetNodeGroupStatusHandler)
@@ -434,7 +447,7 @@ func DeleteNodeGroupNodeHandler(c echo.Context) error {
 	nodename := c.Param("nodename")
 	err := nodegroup.GetNodeGroups().DeleteNodesInNodeGroupByNodeName(id, nodename)
 	if err != nil {
-		err = fmt.Errorf("nodegroup(%s) delete %d node failed, %s", id, nodename, err)
+		err = fmt.Errorf("nodegroup(%s) delete %s node failed, %s", id, nodename, err)
 		klog.Error(err)
 		return c.JSON(ServiceCode2HttpCode(CodeServerErr), Response{ServiceCode: CodeServerErr, Error: err.Error()})
 	}
