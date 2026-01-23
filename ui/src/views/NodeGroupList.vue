@@ -259,7 +259,8 @@ const handleChangeSizeDialogClose = () => {
 const loadData = async () => {
   try {
     const { data } = await getNodeGroups()
-    nodeGroups.value = data.data || []
+    const result = data.data
+    nodeGroups.value = Array.isArray(result) ? result : (result ? [result] : [])
   } catch (error) {
     console.error('加载 NodeGroup 失败:', error)
     ElMessage.error('加载 NodeGroup 失败')

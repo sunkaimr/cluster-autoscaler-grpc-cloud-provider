@@ -35,7 +35,7 @@ export const stageNameMap: Record<Stage, string> = {
 
 // Status 中文映射
 export const statusNameMap: Record<Status, string> = {
-  Init: '初始化',
+  Init: '初始状态',
   InProcess: '处理中',
   Success: '成功',
   Failed: '失败',

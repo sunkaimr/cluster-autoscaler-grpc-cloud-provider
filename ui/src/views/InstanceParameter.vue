@@ -80,9 +80,9 @@ import {
   updateInstanceParameter,
   deleteInstanceParameter
 } from '@/api/instanceParameter'
-import type { InstanceParameter } from '@/types'
+import type { InstanceParameterMap, InstanceParameter } from '@/types'
 
-const parametersData = ref<InstanceParameter>({})
+const parametersData = ref<InstanceParameterMap>({})
 const activeParameter = ref<string>('')
 
 // 参数名称列表
@@ -165,7 +165,7 @@ const handleConfirmAdd = () => {
   originalYamls[addForm.parameterName] = ''
 
   // 添加到参数数据中（空对象）
-  parametersData.value[addForm.parameterName] = {}
+  parametersData.value[addForm.parameterName] = {} as InstanceParameter
 
   // 激活新添加的参数
   activeParameter.value = addForm.parameterName
@@ -195,7 +195,7 @@ const handleSave = async (paramName: string) => {
 
     const paramData = parse(yamlContents[paramName])
 
-    const data: InstanceParameter = {
+    const data: InstanceParameterMap = {
       [paramName]: paramData
     }
 

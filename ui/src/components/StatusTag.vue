@@ -1,5 +1,8 @@
 <template>
-  <el-tag :type="color" size="small">{{ displayName }}</el-tag>
+  <el-tooltip v-if="showTooltip" :content="tipContent" placement="top">
+    <el-tag :type="color" size="small">{{ displayName }}</el-tag>
+  </el-tooltip>
+  <el-tag v-else :type="color" size="small">{{ displayName }}</el-tag>
 </template>
 
 <script setup lang="ts">
@@ -10,6 +13,7 @@ import { stageColorMap, statusColorMap, stageNameMap, statusNameMap } from '@/ut
 interface Props {
   value: Stage | Status
   type: 'stage' | 'status'
+  tipContent?: string
 }
 
 const props = defineProps<Props>()
@@ -26,5 +30,9 @@ const displayName = computed(() => {
     return stageNameMap[props.value as Stage] || props.value
   }
   return statusNameMap[props.value as Status] || props.value
+})
+
+const showTooltip = computed(() => {
+  return props.tipContent != null && props.tipContent !== ''
 })
 </script>

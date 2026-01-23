@@ -11,15 +11,15 @@ echo Step 2: Copying UI dist to server directory...
 if not exist server\ui mkdir server\ui
 xcopy /E /I /Y ui\dist server\ui\dist
 
-echo Step 3: Building Go application...
-set APP=cluster-autoscaler-grpc-provider.exe
-set VER=v1.1.0
+@REM echo Step 3: Building Go application...
+@REM set APP=cluster-autoscaler-grpc-provider.exe
+@REM set VER=v1.1.0
 
-for /f "tokens=*" %%i in ('git show -s --format^=%%H') do set GIT_COMMIT=%%i
-for /f "tokens=*" %%i in ('go version') do set GO_VERSION=%%i
+@REM for /f "tokens=*" %%i in ('git show -s --format^=%%H') do set GIT_COMMIT=%%i
+@REM for /f "tokens=*" %%i in ('go version') do set GO_VERSION=%%i
 
-go build -ldflags "-X 'main.version=%VER%' -X 'main.goVersion=%GO_VERSION%' -X 'main.gitCommit=%GIT_COMMIT%'" -o %APP% main.go
+@REM go build -ldflags "-X 'main.version=%VER%' -X 'main.goVersion=%GO_VERSION%' -X 'main.gitCommit=%GIT_COMMIT%'" -o %APP% main.go
 
-echo Build completed successfully!
-echo Binary: %APP%
-echo UI files are embedded in the binary
+@REM echo Build completed successfully!
+@REM echo Binary: %APP%
+@REM echo UI files are embedded in the binary

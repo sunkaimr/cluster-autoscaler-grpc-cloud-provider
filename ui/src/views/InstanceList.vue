@@ -82,6 +82,7 @@
 
     <!-- Instance 表格 -->
     <el-table :data="instances" style="width: 100%" border>
+      <el-table-column prop="nodegroup" label="NodeGroup" width="120" align="center" />
       <el-table-column prop="id" label="Instance ID" width="120" align="center" />
       <el-table-column prop="name" label="Name" width="250" align="center" />
       <el-table-column prop="ip" label="IP" width="120" align="center" />
@@ -92,7 +93,7 @@
       </el-table-column>
       <el-table-column label="Status" width="100" align="center">
         <template #default="{ row }">
-          <StatusTag :value="row.status" type="status" />
+          <StatusTag :value="row.status" type="status" :tip-content="row.error" />
         </template>
       </el-table-column>
       <el-table-column prop="providerID" label="Provider ID" min-width="200" align="center" />
@@ -167,7 +168,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getInstances, updateInstanceStatus } from '@/api/instance'
 import { getNodeGroups } from '@/api/nodegroup'
@@ -175,9 +176,6 @@ import type { Instance, NodeGroup, Stage, Status } from '@/types'
 import { stageNameMap, statusNameMap, formatTime } from '@/utils'
 import StatusTag from '@/components/StatusTag.vue'
 
-interface InstanceWithNodeGroup extends Instance {
-  nodeGroupId: string
-}
 
 const stages: Stage[] = [
   'Pending',
@@ -193,7 +191,7 @@ const stages: Stage[] = [
 const statuses: Status[] = ['Init', 'InProcess', 'Success', 'Failed', 'Unknown']
 
 const nodeGroups = ref<NodeGroup[]>([])
-const instances = ref<InstanceWithNodeGroup[]>([])
+const instances = ref<Instance[]>([])
 const dialogVisible = ref(false)
 
 const filterForm = ref({
@@ -266,10 +264,10 @@ const handlePageChange = async (page: number) => {
   await loadInstancesWithFilter()
 }
 
-const handleEdit = (row: InstanceWithNodeGroup) => {
+const handleEdit = (row: Instance) => {
   form.value = {
     id: row.id,
-    nodeGroupId: row.nodeGroupId,
+    nodeGroupId: row.nodegroup,
     name: row.name || '',
     ip: row.ip || '',
     stage: row.stage,
@@ -310,39 +308,28 @@ const handleDialogClose = () => {
 }
 
 // 加载 Instances（带筛选参数）
-const loadInstancesWithFilter = async () => {
+const loadInstancesWithFilter = async (params: any = {}) => {
   try {
     // 构建查询参数
-    const params: any = {}
+    const queryParams: any = {...params}
 
-    if (filterForm.value.nodegroup) params.nodegroup = filterForm.value.nodegroup
-    if (filterForm.value.stage) params.stage = filterForm.value.stage
-    if (filterForm.value.status) params.status = filterForm.value.status
+    if (filterForm.value.nodegroup) queryParams.nodegroup = filterForm.value.nodegroup
+    if (filterForm.value.stage) queryParams.stage = filterForm.value.stage
+    if (filterForm.value.status) queryParams.status = filterForm.value.status
 
     // 根据选择的搜索类型设置搜索参数
     if (filterForm.value.keyword) {
       const keyword = filterForm.value.keyword.trim()
-      params[filterForm.value.searchType] = keyword
+      queryParams[filterForm.value.searchType] = keyword
     }
 
-    const instancesRes = await getInstances(params)
+    const instancesRes = await getInstances(queryParams)
     const instancesList = instancesRes.data.data || []
 
-    // 创建 instance ID 到 nodeGroup ID 的映射
-    const instanceToNodeGroupMap = new Map<string, string>()
-
-    nodeGroups.value.forEach((ng) => {
-      if (ng.instances && Array.isArray(ng.instances)) {
-        ng.instances.forEach((instance) => {
-          instanceToNodeGroupMap.set(instance.id, ng.id)
-        })
-      }
-    })
-
-    // 将 Instance 与 NodeGroup 关联
-    const allInstances: InstanceWithNodeGroup[] = instancesList.map((instance) => ({
+    // 直接使用后端返回的实例列表
+    const allInstances: Instance[] = instancesList.map((instance) => ({
       ...instance,
-      nodeGroupId: instanceToNodeGroupMap.get(instance.id) || '未知'
+      nodegroup: instance.nodegroup || '未知'
     }))
 
     // 更新总数
@@ -363,10 +350,11 @@ const loadData = async () => {
   try {
     // 先加载 NodeGroups
     const ngRes = await getNodeGroups()
-    nodeGroups.value = ngRes.data.data || []
+    const nodeGroupData = ngRes.data.data
+    nodeGroups.value = Array.isArray(nodeGroupData) ? nodeGroupData : []
 
     // 再加载所有 Instances
-    await loadInstancesWithFilter({})
+    await loadInstancesWithFilter()
   } catch (error) {
     console.error('加载数据失败:', error)
     ElMessage.error('加载数据失败')

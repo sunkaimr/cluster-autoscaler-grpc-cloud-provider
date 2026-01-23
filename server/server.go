@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -71,7 +72,43 @@ func HttpServer(ctx context.Context, addr string) {
 	if err != nil {
 		klog.Errorf("failed to get embedded UI files: %s", err)
 	} else {
-		e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(uiFS))))
+		// Serve static files (CSS, JS, images, etc.)
+		staticHandler := echo.WrapHandler(http.FileServer(http.FS(uiFS)))
+
+		// Handle all non-API routes by serving index.html for SPA routing
+		e.GET("/*", func(c echo.Context) error {
+			path := c.Request().URL.Path
+
+			// If the path is an API route, don't interfere
+			if strings.HasPrefix(path, "/api/") {
+				return echo.ErrNotFound
+			}
+
+			// Check if the requested file exists in the static directory
+			// If it does, serve it; otherwise, serve index.html for SPA routing
+			_, err := uiFS.Open(strings.TrimPrefix(path, "/"))
+			if err == nil {
+				// File exists, serve it normally
+				return staticHandler(c)
+			}
+
+			// File doesn't exist, serve index.html for SPA routing
+			indexFile, err := uiFS.Open("index.html")
+			if err != nil {
+				return echo.NewHTTPError(http.StatusNotFound, "index.html not found")
+			}
+			defer indexFile.Close()
+
+			// Read the index.html content
+			content, err := io.ReadAll(indexFile)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "could not read index.html")
+			}
+
+			// Set appropriate content type for HTML
+			c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=UTF-8")
+			return c.HTMLBlob(http.StatusOK, content)
+		})
 	}
 
 	v1 := e.Group("/api/v1")
@@ -340,47 +377,51 @@ func UpdateNodeGroupHandler(c echo.Context) error {
 // GetNodeGroupInstanceHandler 查询Instance状态
 // nodegroup、id、name、IP、Stage、Status查询
 func GetNodeGroupInstanceHandler(c echo.Context) error {
-	id, name, ip, stage, status, ng := c.QueryParam("id"), c.QueryParam("name"), c.QueryParam("ip"), c.QueryParam("stage"), c.QueryParam("status"), c.QueryParam("nodegroup")
+	id, name, ip, stage, status, ngQuery := c.QueryParam("id"), c.QueryParam("name"), c.QueryParam("ip"), c.QueryParam("stage"), c.QueryParam("status"), c.QueryParam("nodegroup")
 
-	instances := make([]*instance.Instance, 0, 100)
-	ngs := nodegroup.GetNodeGroups().List()
-	if id != "" {
-		for _, v := range ngs {
-			if ins := v.Instances.Find(id); ins != nil {
-				instances = append(instances, ins)
-				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
-			}
-		}
-		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
-	} else if name != "" {
-		for _, v := range ngs {
-			if ins := v.Instances.FindByName(name); ins != nil {
-				instances = append(instances, ins)
-				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
-			}
-		}
-		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
-	} else if ip != "" {
-		for _, v := range ngs {
-			if ins := v.Instances.FindByIp(ip); ins != nil {
-				instances = append(instances, ins)
-				return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: instances})
-			}
-		}
-		return c.JSON(ServiceCode2HttpCode(CodeInstanceNotFound), Response{ServiceCode: CodeInstanceNotFound})
-	} else if stage != "" {
-		ins := nodegroup.GetNodeGroups().FilterInstanceByStages(instance.Stage(stage))
-		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: ins})
-	} else if status != "" {
-		ins := nodegroup.GetNodeGroups().FilterInstanceByStatus(instance.Status(status))
-		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: ins})
-	} else if ng != "" {
-		v, _ := nodegroup.GetNodeGroups().FindNodeGroupById(ng)
-		return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: v.Instances})
+	type InstanceService struct {
+		NodeGroup string `json:"nodegroup" yaml:"nodegroup"`
+		*instance.Instance
 	}
 
-	for _, v := range ngs {
-		instances = append(instances, v.Instances...)
+	instances := make([]InstanceService, 0, 100)
+
+	ngs := nodegroup.GetNodeGroups().List()
+	for _, ng := range ngs {
+		if ngQuery != "" && ng.Id != ngQuery {
+			continue
+		}
+
+		for _, ins := range ng.Instances {
+			matched := false
+
+			if id != "" && strings.Contains(ins.ID, id) {
+				matched = true
+			}
+
+			if name != "" && strings.Contains(ins.Name, name) {
+				matched = true
+			}
+
+			if ip != "" && strings.Contains(ins.IP, ip) {
+				matched = true
+			}
+
+			if stage != "" && stage == string(ins.Stage) {
+				matched = true
+			}
+
+			if status != "" && status == string(ins.Status) {
+				matched = true
+			}
+
+			if matched || (id == "" && name == "" && ip == "" && stage == "" && status == "") {
+				instances = append(instances, InstanceService{
+					NodeGroup: ng.Id,
+					Instance:  ins,
+				})
+			}
+		}
 	}
 
 	return c.JSON(http.StatusOK, Response{ServiceCode: CodeOk, Data: &instances})

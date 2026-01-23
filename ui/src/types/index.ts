@@ -22,6 +22,7 @@ export type Status = 'Init' | 'InProcess' | 'Success' | 'Failed' | 'Unknown'
 
 // Instance 实例
 export interface Instance {
+  nodegroup: string
   id: string
   name: string
   ip: string

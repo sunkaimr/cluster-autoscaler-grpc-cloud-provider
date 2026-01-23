@@ -127,10 +127,10 @@ import { ref, onMounted, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { parse, stringify } from 'yaml'
 import { getAccounts, updateAccount, deleteAccount, deleteProvider } from '@/api/account'
-import type { CloudProviderOption, Accounts } from '@/types'
+import type { Accounts } from '@/types'
 
 const activeProvider = ref<string>('')
-const accountsData = ref<CloudProviderOption>({})
+const accountsData = ref<Accounts>({})
 
 // 动态获取云服务商列表（直接使用后端返回的 key）
 const providers = computed(() => {
@@ -170,7 +170,7 @@ const getAccountKey = (provider: string, accountName: string) => {
 
 // 获取指定云服务商的所有账号列表
 const getProviderAccounts = (provider: string) => {
-  const accounts = accountsData.value[provider as keyof CloudProviderOption] || {}
+  const accounts = accountsData.value[provider] || {}
   return Object.keys(accounts)
 }
 
@@ -196,7 +196,7 @@ const initAccountYaml = () => {
 
   // 遍历所有云服务商
   for (const provider of Object.keys(accountsData.value)) {
-    const accounts = accountsData.value[provider as keyof CloudProviderOption] || {}
+    const accounts = accountsData.value[provider] || {}
     for (const [accountName, accountData] of Object.entries(accounts)) {
       const accountKey = getAccountKey(provider, accountName)
       yamlContents[accountKey] = stringify(accountData)
@@ -237,7 +237,7 @@ const handleConfirmAddProvider = async () => {
   }
 
   // 检查云服务商是否已存在
-  if (accountsData.value[addProviderForm.providerName as keyof CloudProviderOption]) {
+  if (accountsData.value[addProviderForm.providerName]) {
     ElMessage.error('云服务商已存在')
     return
   }
@@ -320,9 +320,9 @@ const handleConfirmAddAccount = () => {
   originalYamls[accountKey] = ''
 
   // 添加到账号数据中（空对象）
-  const accounts = accountsData.value[addAccountForm.provider as keyof CloudProviderOption] || {}
-  accounts[addAccountForm.accountName] = {}
-  accountsData.value[addAccountForm.provider as keyof CloudProviderOption] = { ...accounts }
+  const accounts = accountsData.value[addAccountForm.provider] || {}
+  accounts[addAccountForm.accountName] = {} as any
+  accountsData.value[addAccountForm.provider] = { ...accounts }
 
   // 激活新添加的账号
   activeProvider.value = addAccountForm.provider
@@ -350,14 +350,14 @@ const handleSave = async (provider: string, accountName: string) => {
     const accountData = parse(yamlContents[accountKey])
 
     // 构造完整的账号数据
-    const updatedAccounts: Accounts = {
-      ...accountsData.value[provider as keyof CloudProviderOption],
+    const updatedAccounts = {
+      ...accountsData.value[provider],
       [accountName]: accountData
     }
 
     await updateAccount({
       [provider]: updatedAccounts
-    })
+    } as Accounts)
 
     ElMessage.success('保存成功')
     originalYamls[accountKey] = yamlContents[accountKey]
